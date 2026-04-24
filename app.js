@@ -36,8 +36,12 @@ els.loadCsvBtn.addEventListener('click', async () => {
     }
 
     await loadApplicants();
+    const parsedRows = Number.isFinite(result.parsed_rows)
+      ? result.parsed_rows
+      : (result.inserted || 0) + (result.skipped || 0);
+
     setStatus(
-      `Ingest complete. Inserted ${result.inserted}, skipped ${result.skipped}, parsed ${result.parsed_rows}.`,
+      `Ingest complete. Inserted ${result.inserted || 0}, skipped ${result.skipped || 0}, parsed ${parsedRows}.`,
       false
     );
     renderIngestDetails(result);
@@ -120,6 +124,15 @@ function setStatus(message, isError) {
 
 function renderIngestDetails(result) {
   const lines = [];
+  if (!('parsed_rows' in result) || !('issues' in result) || !('detected_headers' in result)) {
+    lines.push(
+      'Warning: API response is missing diagnostics fields. You may be running an older server process.'
+    );
+    lines.push('Please stop and restart the app with: python3 app.py');
+    lines.push('');
+  }
+
+  lines.push(`App version: ${result.app_version || 'unknown'}`);
   lines.push(`Detected delimiter: ${result.detected_delimiter || 'unknown'}`);
   lines.push(`Detected headers (${(result.detected_headers || []).length} shown):`);
   lines.push((result.detected_headers || []).join(', ') || '(none)');

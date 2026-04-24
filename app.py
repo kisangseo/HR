@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / "hr.db"
+APP_VERSION = "2026-04-24.ingest-diagnostics-v2"
 
 INDEX_HTML = ROOT / "index.html"
 STATIC_JS = ROOT / "app.js"
@@ -297,8 +298,20 @@ def ingest_csv(csv_text: str) -> dict[str, Any]:
                 ],
             }
         )
+    elif skipped > 0 and not errors:
+        errors.append(
+            {
+                "row": 0,
+                "reason": "Rows were skipped but no row-level diagnostics were captured.",
+                "details": [
+                    "This usually indicates an old server process is running older code.",
+                    "Stop and restart python3 app.py, then try ingest again.",
+                ],
+            }
+        )
 
     return {
+        "app_version": APP_VERSION,
         "inserted": inserted,
         "skipped": skipped,
         "parsed_rows": parsed_rows,
@@ -404,6 +417,10 @@ class Handler(BaseHTTPRequestHandler):
             }
             data = query_applicants(filters)
             self._send_json({"applicants": data})
+            return
+
+        if parsed.path == "/api/version":
+            self._send_json({"app_version": APP_VERSION})
             return
 
         self.send_error(404)

@@ -20,6 +20,7 @@ This version moves the ingest logic into Python so future workflow functions can
   - `date_from`
   - `date_to`
   - `job_title`
+- Debug server build with `GET /api/version`
 
 ## Run
 
