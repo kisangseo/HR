@@ -202,8 +202,6 @@ def map_row(raw_row: dict[str, str]) -> tuple[dict[str, Any] | None, list[str]]:
 
     if not email:
         errors.append("Email field missing.")
-    if not phone:
-        errors.append("Phone field missing.")
 
     if not primary_position:
         return None, errors
