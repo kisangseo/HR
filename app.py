@@ -4,7 +4,7 @@ import csv
 import io
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -68,7 +68,8 @@ def init_db() -> None:
 
 
 def normalize_key(value: str) -> str:
-    return " ".join(value.strip().lower().split())
+    normalized = " ".join(value.strip().lower().split())
+    return normalized.lstrip("\ufeff")
 
 
 def split_multi_value(value: str) -> list[str]:
@@ -81,6 +82,16 @@ def pick_first(row: dict[str, str], keys: list[str]) -> str:
         value = row.get(key, "").strip()
         if value:
             return value
+    return ""
+
+
+def pick_first_by_substring(row: dict[str, str], fragments: list[str]) -> str:
+    for key, value in row.items():
+        key_lower = key.lower()
+        if any(fragment in key_lower for fragment in fragments):
+            text = (value or "").strip()
+            if text:
+                return text
     return ""
 
 
@@ -97,6 +108,12 @@ def parse_submitted_at(raw_value: str) -> str | None:
         "%m/%d/%Y %H:%M:%S",
         "%m/%d/%Y %H:%M",
         "%m/%d/%Y %I:%M %p",
+        "%d/%m/%Y",
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M",
+        "%d-%b-%Y",
+        "%b %d, %Y",
+        "%B %d, %Y",
     ]
 
     for fmt in accepted_formats:
@@ -144,20 +161,28 @@ def extract_other_positions(row: dict[str, str], primary_position: str) -> list[
 def map_row(raw_row: dict[str, str]) -> dict[str, Any] | None:
     row = {normalize_key(k): (v or "") for k, v in raw_row.items()}
 
-    first_name = pick_first(row, ALIASES["first_name"])
-    last_name = pick_first(row, ALIASES["last_name"])
+    first_name = pick_first(row, ALIASES["first_name"]) or pick_first_by_substring(
+        row, ["name: fi", "first"]
+    )
+    last_name = pick_first(row, ALIASES["last_name"]) or pick_first_by_substring(
+        row, ["name: la", "last"]
+    )
     full_name = pick_first(row, ALIASES["full_name"])
 
     name_parts = [first_name, last_name]
     combined_name = " ".join([part for part in name_parts if part]).strip()
     final_name = combined_name or full_name or "Unknown Applicant"
 
-    submitted_at_raw = pick_first(row, ALIASES["submitted_at"])
+    submitted_at_raw = pick_first(row, ALIASES["submitted_at"]) or pick_first_by_substring(
+        row, ["entry date", "submission", "created", "timestamp", " date"]
+    )
     submitted_at = parse_submitted_at(submitted_at_raw)
     if not submitted_at:
-        return None
+        submitted_at = datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
 
-    primary_position = pick_first(row, ALIASES["primary_position"])
+    primary_position = pick_first(row, ALIASES["primary_position"]) or pick_first_by_substring(
+        row, ["primary", "position", "job title"]
+    )
     other_positions = extract_other_positions(row, primary_position)
 
     return {
@@ -165,8 +190,10 @@ def map_row(raw_row: dict[str, str]) -> dict[str, Any] | None:
         "first_name": first_name,
         "last_name": last_name,
         "full_name": final_name,
-        "email": pick_first(row, ALIASES["email"]),
-        "phone": pick_first(row, ALIASES["phone"]),
+        "email": pick_first(row, ALIASES["email"]) or pick_first_by_substring(row, ["email"]),
+        "phone": pick_first(row, ALIASES["phone"]) or pick_first_by_substring(
+            row, ["phone", "mobile"]
+        ),
         "primary_position": primary_position,
         "other_positions": other_positions,
         "status": "interest_submitted",
@@ -176,12 +203,23 @@ def map_row(raw_row: dict[str, str]) -> dict[str, Any] | None:
 
 
 def ingest_csv(csv_text: str) -> dict[str, int]:
-    reader = csv.DictReader(io.StringIO(csv_text))
+    clean_text = csv_text.replace("\x00", "")
+    sample = clean_text[:4096]
+
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+    except csv.Error:
+        dialect = csv.excel
+
+    reader = csv.DictReader(io.StringIO(clean_text), dialect=dialect)
     inserted = 0
     skipped = 0
 
     with sqlite3.connect(DB_PATH) as conn:
         for raw_row in reader:
+            if raw_row is None:
+                skipped += 1
+                continue
             mapped = map_row(raw_row)
             if not mapped:
                 skipped += 1
