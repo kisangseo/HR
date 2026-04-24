@@ -6,7 +6,7 @@ This version moves the ingest logic into Python so future workflow functions can
 
 - `app.py`: Python HTTP server + API + SQLite persistence
 - `index.html`, `styles.css`, `app.js`: UI for upload, search, and table rendering
-- `schema.sql`: PostgreSQL schema for future production DB alignment
+- `schema.sql`: SQL Server / Azure Data Studio-ready schema for `job_applications`
 
 ## Features
 
