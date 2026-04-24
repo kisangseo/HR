@@ -4,6 +4,7 @@ import csv
 import io
 import json
 import sqlite3
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -115,6 +116,8 @@ def parse_submitted_at(raw_value: str) -> str | None:
         "%d-%b-%Y",
         "%b %d, %Y",
         "%B %d, %Y",
+        "%b %d, %Y %I:%M %p",
+        "%B %d, %Y %I:%M %p",
     ]
 
     for fmt in accepted_formats:
@@ -310,6 +313,14 @@ def ingest_csv(csv_text: str) -> dict[str, Any]:
             }
         )
 
+    issue_counter: Counter[str] = Counter()
+    for issue in errors:
+        if issue.get("details"):
+            for detail in issue["details"]:
+                issue_counter[detail] += 1
+        else:
+            issue_counter[issue.get("reason", "Unknown issue")] += 1
+
     return {
         "app_version": APP_VERSION,
         "inserted": inserted,
@@ -317,6 +328,8 @@ def ingest_csv(csv_text: str) -> dict[str, Any]:
         "parsed_rows": parsed_rows,
         "detected_delimiter": delimiter,
         "detected_headers": fieldnames[:20],
+        "issue_count": len(errors),
+        "issue_summary": dict(issue_counter.most_common(10)),
         "issues": errors[:200],
     }
 

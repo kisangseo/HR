@@ -138,13 +138,27 @@ function renderIngestDetails(result) {
   lines.push((result.detected_headers || []).join(', ') || '(none)');
 
   const issues = result.issues || [];
+  const summary = result.issue_summary || {};
+  const summaryEntries = Object.entries(summary);
+  if (summaryEntries.length) {
+    lines.push('\nTop issue summary:');
+    for (const [message, count] of summaryEntries) {
+      lines.push(`- ${count}x ${message}`);
+    }
+  }
+
   if (!issues.length) {
     lines.push('\\nNo ingest issues reported.');
   } else {
-    lines.push(`\\nIssues / warnings (${issues.length}):`);
-    for (const issue of issues) {
+    const totalIssues = result.issue_count ?? issues.length;
+    const maxToShow = 40;
+    lines.push(`\\nIssues / warnings (showing ${Math.min(issues.length, maxToShow)} of ${totalIssues}):`);
+    for (const issue of issues.slice(0, maxToShow)) {
       const details = (issue.details || []).join(' | ');
       lines.push(`- row ${issue.row}: ${issue.reason}${details ? ` -> ${details}` : ''}`);
+    }
+    if (totalIssues > maxToShow) {
+      lines.push(`... ${totalIssues - maxToShow} more issue rows not shown.`);
     }
   }
 

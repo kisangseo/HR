@@ -39,3 +39,4 @@ If a submission date is malformed/missing (for example spreadsheet-export placeh
 ingest falls back to the current timestamp so records are not dropped.
 
 If rows are skipped, the API/UI now shows row-level reasons so you can see exactly which field failed mapping.
+The ingest panel now also shows a compact issue summary and truncates very long issue lists.
