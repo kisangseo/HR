@@ -158,7 +158,8 @@ def extract_other_positions(row: dict[str, str], primary_position: str) -> list[
     return deduped
 
 
-def map_row(raw_row: dict[str, str]) -> dict[str, Any] | None:
+def map_row(raw_row: dict[str, str]) -> tuple[dict[str, Any] | None, list[str]]:
+    errors: list[str] = []
     row = {normalize_key(k): (v or "") for k, v in raw_row.items()}
 
     first_name = pick_first(row, ALIASES["first_name"]) or pick_first_by_substring(
@@ -172,37 +173,53 @@ def map_row(raw_row: dict[str, str]) -> dict[str, Any] | None:
     name_parts = [first_name, last_name]
     combined_name = " ".join([part for part in name_parts if part]).strip()
     final_name = combined_name or full_name or "Unknown Applicant"
+    if final_name == "Unknown Applicant":
+        errors.append("No name fields were detected.")
 
     submitted_at_raw = pick_first(row, ALIASES["submitted_at"]) or pick_first_by_substring(
-        row, ["entry date", "submission", "created", "timestamp", " date"]
+        row, ["entry date", "entry d", "submission", "created", "timestamp", " date"]
     )
     submitted_at = parse_submitted_at(submitted_at_raw)
     if not submitted_at:
+        if submitted_at_raw.strip():
+            errors.append(f"Unrecognized submission date format: {submitted_at_raw!r}.")
+        else:
+            errors.append("No submission date field found; using ingest timestamp.")
         submitted_at = datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
 
     primary_position = pick_first(row, ALIASES["primary_position"]) or pick_first_by_substring(
         row, ["primary", "position", "job title"]
     )
+    if not primary_position:
+        errors.append("Primary position column/value not found.")
     other_positions = extract_other_positions(row, primary_position)
+    email = pick_first(row, ALIASES["email"]) or pick_first_by_substring(row, ["email"])
+    phone = pick_first(row, ALIASES["phone"]) or pick_first_by_substring(row, ["phone", "mobile"])
+
+    if not email:
+        errors.append("Email field missing.")
+    if not phone:
+        errors.append("Phone field missing.")
+
+    if not primary_position:
+        return None, errors
 
     return {
         "submitted_at": submitted_at,
         "first_name": first_name,
         "last_name": last_name,
         "full_name": final_name,
-        "email": pick_first(row, ALIASES["email"]) or pick_first_by_substring(row, ["email"]),
-        "phone": pick_first(row, ALIASES["phone"]) or pick_first_by_substring(
-            row, ["phone", "mobile"]
-        ),
+        "email": email,
+        "phone": phone,
         "primary_position": primary_position,
         "other_positions": other_positions,
         "status": "interest_submitted",
         "source": "csv",
         "raw_payload": raw_row,
-    }
+    }, errors
 
 
-def ingest_csv(csv_text: str) -> dict[str, int]:
+def ingest_csv(csv_text: str) -> dict[str, Any]:
     clean_text = csv_text.replace("\x00", "")
     sample = clean_text[:4096]
 
@@ -214,15 +231,28 @@ def ingest_csv(csv_text: str) -> dict[str, int]:
     reader = csv.DictReader(io.StringIO(clean_text), dialect=dialect)
     inserted = 0
     skipped = 0
+    parsed_rows = 0
+    errors: list[dict[str, Any]] = []
+    fieldnames = [normalize_key(name or "") for name in (reader.fieldnames or [])]
+    delimiter = getattr(dialect, "delimiter", ",")
 
     with sqlite3.connect(DB_PATH) as conn:
-        for raw_row in reader:
+        for index, raw_row in enumerate(reader, start=2):
             if raw_row is None:
                 skipped += 1
+                errors.append({"row": index, "reason": "Empty row object from parser."})
                 continue
-            mapped = map_row(raw_row)
+            parsed_rows += 1
+            mapped, row_errors = map_row(raw_row)
             if not mapped:
                 skipped += 1
+                errors.append(
+                    {
+                        "row": index,
+                        "reason": "Record not ingested.",
+                        "details": row_errors or ["Unknown mapping failure."],
+                    }
+                )
                 continue
 
             conn.execute(
@@ -247,8 +277,35 @@ def ingest_csv(csv_text: str) -> dict[str, int]:
                 ),
             )
             inserted += 1
+            if row_errors:
+                errors.append(
+                    {
+                        "row": index,
+                        "reason": "Record ingested with warnings.",
+                        "details": row_errors,
+                    }
+                )
 
-    return {"inserted": inserted, "skipped": skipped}
+    if parsed_rows == 0:
+        errors.append(
+            {
+                "row": 0,
+                "reason": "No data rows parsed from file.",
+                "details": [
+                    "The file may be XLS/XLSX instead of CSV/TSV, or line delimiters are not recognized.",
+                    "Try 'Save As CSV UTF-8' and upload again.",
+                ],
+            }
+        )
+
+    return {
+        "inserted": inserted,
+        "skipped": skipped,
+        "parsed_rows": parsed_rows,
+        "detected_delimiter": delimiter,
+        "detected_headers": fieldnames[:20],
+        "issues": errors[:200],
+    }
 
 
 def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:

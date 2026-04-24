@@ -14,6 +14,7 @@ This version moves the ingest logic into Python so future workflow functions can
 - Auto-detect delimiter for CSV-like exports (comma, tab, semicolon, pipe)
 - Normalize duplicate/conditional "Other Interested Positions" source columns
 - Persist applicant records to local SQLite (`hr.db`)
+- Return ingest diagnostics (detected delimiter, detected headers, row-level warnings/skips)
 - Search applicants via `GET /api/applicants` filters:
   - `name`
   - `date_from`
@@ -35,3 +36,5 @@ only the first non-empty value is used during normalization, and empty duplicate
 
 If a submission date is malformed/missing (for example spreadsheet-export placeholders like `########`),
 ingest falls back to the current timestamp so records are not dropped.
+
+If rows are skipped, the API/UI now shows row-level reasons so you can see exactly which field failed mapping.

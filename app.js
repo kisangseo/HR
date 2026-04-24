@@ -6,6 +6,7 @@ const els = {
   csvFile: document.getElementById('csvFile'),
   loadCsvBtn: document.getElementById('loadCsvBtn'),
   ingestStatus: document.getElementById('ingestStatus'),
+  ingestDetails: document.getElementById('ingestDetails'),
   nameFilter: document.getElementById('nameFilter'),
   dateFromFilter: document.getElementById('dateFromFilter'),
   dateToFilter: document.getElementById('dateToFilter'),
@@ -35,9 +36,14 @@ els.loadCsvBtn.addEventListener('click', async () => {
     }
 
     await loadApplicants();
-    setStatus(`Ingest complete. Inserted ${result.inserted}, skipped ${result.skipped}.`, false);
+    setStatus(
+      `Ingest complete. Inserted ${result.inserted}, skipped ${result.skipped}, parsed ${result.parsed_rows}.`,
+      false
+    );
+    renderIngestDetails(result);
   } catch (error) {
     setStatus(error.message, true);
+    els.ingestDetails.textContent = '';
   }
 });
 
@@ -110,6 +116,26 @@ function setStatus(message, isError) {
   els.ingestStatus.textContent = message;
   els.ingestStatus.classList.toggle('error', isError);
   els.ingestStatus.classList.toggle('ok', !isError);
+}
+
+function renderIngestDetails(result) {
+  const lines = [];
+  lines.push(`Detected delimiter: ${result.detected_delimiter || 'unknown'}`);
+  lines.push(`Detected headers (${(result.detected_headers || []).length} shown):`);
+  lines.push((result.detected_headers || []).join(', ') || '(none)');
+
+  const issues = result.issues || [];
+  if (!issues.length) {
+    lines.push('\\nNo ingest issues reported.');
+  } else {
+    lines.push(`\\nIssues / warnings (${issues.length}):`);
+    for (const issue of issues) {
+      const details = (issue.details || []).join(' | ');
+      lines.push(`- row ${issue.row}: ${issue.reason}${details ? ` -> ${details}` : ''}`);
+    }
+  }
+
+  els.ingestDetails.textContent = lines.join('\\n');
 }
 
 loadApplicants().catch((error) => setStatus(error.message, true));
