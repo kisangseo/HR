@@ -59,6 +59,20 @@ def split_multi_value(value: str) -> list[str]:
     return [part.strip() for part in normalized.split(",") if part.strip()]
 
 
+def make_unique_headers(headers: list[str]) -> list[str]:
+    seen: dict[str, int] = {}
+    unique: list[str] = []
+    for header in headers:
+        base = header or ""
+        count = seen.get(base, 0) + 1
+        seen[base] = count
+        if count == 1:
+            unique.append(base)
+        else:
+            unique.append(f"{base}__dup{count}")
+    return unique
+
+
 def pick_first(row: dict[str, str], keys: list[str]) -> str:
     for key in keys:
         value = row.get(key, "").strip()
@@ -226,21 +240,29 @@ def ingest_csv(csv_text: str) -> dict[str, Any]:
     except csv.Error:
         dialect = csv.excel
 
-    reader = csv.DictReader(io.StringIO(clean_text), dialect=dialect)
+    base_reader = csv.reader(io.StringIO(clean_text), dialect=dialect)
+    rows = list(base_reader)
+    if not rows:
+        rows = [[]]
+    original_headers = rows[0] if rows else []
+    unique_headers = make_unique_headers(original_headers)
     inserted = 0
     skipped = 0
     parsed_rows = 0
     errors: list[dict[str, Any]] = []
-    fieldnames = [normalize_key(name or "") for name in (reader.fieldnames or [])]
+    fieldnames = [normalize_key(name or "") for name in original_headers]
     delimiter = getattr(dialect, "delimiter", ",")
 
     with get_sql_connection() as conn:
         cursor = conn.cursor()
-        for index, raw_row in enumerate(reader, start=2):
-            if raw_row is None:
+        for index, row_values in enumerate(rows[1:], start=2):
+            if row_values is None:
                 skipped += 1
                 errors.append({"row": index, "reason": "Empty row object from parser."})
                 continue
+            raw_row = {}
+            for col_index, unique_header in enumerate(unique_headers):
+                raw_row[unique_header] = row_values[col_index] if col_index < len(row_values) else ""
             parsed_rows += 1
             mapped, row_errors = map_row(raw_row)
             if not mapped:
