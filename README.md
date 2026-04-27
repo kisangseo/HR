@@ -14,6 +14,8 @@ This version runs ingest/query directly against SQL Server so the web app and yo
 - Auto-detect delimiter for CSV-like exports (comma, tab, semicolon, pipe)
 - Normalize duplicate/conditional "Other Interested Positions" source columns
 - Persist applicant records to SQL Server (`job_applications`)
+- Normalize phone values to digits only (leading `+` removed)
+- Store and display submission date as date-only (`YYYY-MM-DD`)
 - Return ingest diagnostics (detected delimiter, detected headers, row-level warnings/skips)
 - Search applicants via `GET /api/applicants` filters:
   - `name`

@@ -103,15 +103,23 @@ def parse_submitted_at(raw_value: str) -> str | None:
     for fmt in accepted_formats:
         try:
             dt = datetime.strptime(raw_value, fmt)
-            return dt.isoformat(timespec="seconds")
+            return dt.date().isoformat()
         except ValueError:
             continue
 
     try:
         dt = datetime.fromisoformat(raw_value)
-        return dt.isoformat(timespec="seconds")
+        return dt.date().isoformat()
     except ValueError:
         return None
+
+
+def normalize_phone(raw_phone: str) -> str:
+    text = (raw_phone or "").strip()
+    if not text:
+        return ""
+    digits = "".join(ch for ch in text if ch.isdigit())
+    return digits
 
 
 def extract_other_positions(row: dict[str, str], primary_position: str) -> list[str]:
@@ -169,7 +177,7 @@ def map_row(raw_row: dict[str, str]) -> tuple[dict[str, Any] | None, list[str]]:
             errors.append(f"Unrecognized submission date format: {submitted_at_raw!r}.")
         else:
             errors.append("No submission date field found; using ingest timestamp.")
-        submitted_at = datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
+        submitted_at = datetime.now(timezone.utc).date().isoformat()
 
     primary_position = pick_first(row, ALIASES["primary_position"]) or pick_first_by_substring(
         row, ["primary", "position", "job title"]
@@ -178,7 +186,9 @@ def map_row(raw_row: dict[str, str]) -> tuple[dict[str, Any] | None, list[str]]:
         errors.append("Primary position column/value not found.")
     other_positions = extract_other_positions(row, primary_position)
     email = pick_first(row, ALIASES["email"]) or pick_first_by_substring(row, ["email"])
-    phone = pick_first(row, ALIASES["phone"]) or pick_first_by_substring(row, ["phone", "mobile"])
+    phone = normalize_phone(
+        pick_first(row, ALIASES["phone"]) or pick_first_by_substring(row, ["phone", "mobile"])
+    )
 
     if not email:
         errors.append("Email field missing.")
@@ -334,12 +344,12 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
         params.append(f"%{filters['job_title'].lower()}%")
 
     if filters.get("date_from"):
-        sql += " AND submitted_at >= ?"
-        params.append(f"{filters['date_from']}T00:00:00")
+        sql += " AND CAST(submitted_at AS date) >= ?"
+        params.append(filters["date_from"])
 
     if filters.get("date_to"):
-        sql += " AND submitted_at <= ?"
-        params.append(f"{filters['date_to']}T23:59:59")
+        sql += " AND CAST(submitted_at AS date) <= ?"
+        params.append(filters["date_to"])
 
     sql += " ORDER BY submitted_at DESC"
 
@@ -349,10 +359,15 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
 
     output: list[dict[str, Any]] = []
     for row in rows:
+        submitted_value = row[1]
+        if hasattr(submitted_value, "date"):
+            submitted_text = submitted_value.date().isoformat()
+        else:
+            submitted_text = str(submitted_value)[:10]
         output.append(
             {
                 "id": row[0],
-                "submittedAt": str(row[1]),
+                "submittedAt": submitted_text,
                 "name": row[2],
                 "email": row[3],
                 "phone": row[4],

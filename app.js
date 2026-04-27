@@ -100,11 +100,18 @@ function renderTable(applicants) {
 }
 
 function formatDate(value) {
-  const date = new Date(value);
+  const text = String(value || '').trim();
+  const isoDateOnlyMatch = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (isoDateOnlyMatch) {
+    const [, year, month, day] = isoDateOnlyMatch;
+    return `${Number(month)}/${Number(day)}/${year}`;
+  }
+
+  const date = new Date(text);
   if (Number.isNaN(date.getTime())) {
     return value || '—';
   }
-  return date.toLocaleString();
+  return date.toLocaleDateString('en-US');
 }
 
 function escapeHtml(value) {
