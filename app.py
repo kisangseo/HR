@@ -15,7 +15,7 @@ from email.message import Message
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 from urllib.parse import parse_qs, urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -711,10 +711,11 @@ def graph_get_access_token() -> str:
 def graph_get_or_create_folder_id(access_token: str, mailbox: str, folder_name: str) -> str:
     mailbox_q = quote(mailbox)
     folder_q = folder_name.replace("'", "''")
-    list_url = (
-        f"https://graph.microsoft.com/v1.0/users/{mailbox_q}/mailFolders"
-        f"?$filter=displayName eq '{folder_q}'&$select=id,displayName"
-    )
+    query = urlencode({
+        "$filter": f"displayName eq '{folder_q}'",
+        "$select": "id,displayName",
+    })
+    list_url = f"https://graph.microsoft.com/v1.0/users/{mailbox_q}/mailFolders?{query}"
     listed = graph_request("GET", list_url, access_token)
     values = listed.get("value", [])
     if values:
@@ -743,13 +744,13 @@ def poll_interest_form_graph_forever() -> None:
 
             mailbox_q = quote(GRAPH_MAILBOX)
             subject_q = EMAIL_SUBJECT_KEYWORD.replace("'", "''")
-            messages_url = (
-                f"https://graph.microsoft.com/v1.0/users/{mailbox_q}/mailFolders/inbox/messages"
-                f"?$select=id,subject,receivedDateTime,body,isRead"
-                f"&$top=50"
-                f"&$filter=isRead eq false and contains(subject,'{subject_q}')"
-                f"&$orderby=receivedDateTime asc"
-            )
+            query = urlencode({
+                "$select": "id,subject,receivedDateTime,body,isRead",
+                "$top": "50",
+                "$filter": f"isRead eq false and contains(subject,'{subject_q}')",
+                "$orderby": "receivedDateTime asc",
+            })
+            messages_url = f"https://graph.microsoft.com/v1.0/users/{mailbox_q}/mailFolders/inbox/messages?{query}"
             result = graph_request("GET", messages_url, access_token)
             messages = result.get("value", [])
             if not messages:
