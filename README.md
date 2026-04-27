@@ -21,6 +21,7 @@ This version moves the ingest logic into Python so future workflow functions can
   - `date_to`
   - `job_title`
 - Debug server build with `GET /api/version`
+- Clear local data with `POST /api/clear-applicants`
 
 ## Run
 
@@ -29,6 +30,9 @@ python3 app.py
 ```
 
 Then open `http://127.0.0.1:8000`.
+
+> Note: the running app uses local SQLite (`hr.db`) for ingest/query.
+> `schema.sql` is for SQL Server deployment/migration, not the live local runtime.
 
 ## Notes about your conditional position fields
 

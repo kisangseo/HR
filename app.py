@@ -383,6 +383,14 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
     return output
 
 
+def clear_applicants() -> dict[str, int]:
+    with sqlite3.connect(DB_PATH) as conn:
+        deleted = conn.execute("SELECT COUNT(*) FROM job_applications").fetchone()[0]
+        conn.execute("DELETE FROM job_applications")
+        conn.execute("DELETE FROM sqlite_sequence WHERE name = 'job_applications'")
+    return {"deleted": deleted}
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send_json(self, payload: Any, code: int = 200) -> None:
         body = json.dumps(payload).encode("utf-8")
@@ -438,6 +446,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path == "/api/clear-applicants":
+            result = clear_applicants()
+            self._send_json(result)
+            return
+
         if parsed.path != "/api/ingest-csv":
             self.send_error(404)
             return
