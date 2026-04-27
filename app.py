@@ -885,7 +885,22 @@ class Handler(BaseHTTPRequestHandler):
 
 def run() -> None:
     if EMAIL_POLL_ENABLED:
-        poller_target = poll_interest_form_graph_forever if GRAPH_TENANT_ID and GRAPH_CLIENT_ID and GRAPH_CLIENT_SECRET else poll_interest_form_emails_forever
+        graph_ready = bool(GRAPH_TENANT_ID and GRAPH_CLIENT_ID and GRAPH_CLIENT_SECRET)
+        if graph_ready:
+            print("Email poller mode: GRAPH")
+            poller_target = poll_interest_form_graph_forever
+        else:
+            print("Email poller mode: IMAP (Graph vars missing)")
+            missing = []
+            if not GRAPH_TENANT_ID:
+                missing.append("HR_GRAPH_TENANT_ID")
+            if not GRAPH_CLIENT_ID:
+                missing.append("HR_GRAPH_CLIENT_ID")
+            if not GRAPH_CLIENT_SECRET:
+                missing.append("HR_GRAPH_CLIENT_SECRET")
+            if missing:
+                print("Missing Graph vars: " + ", ".join(missing))
+            poller_target = poll_interest_form_emails_forever
         thread = threading.Thread(target=poller_target, daemon=True)
         thread.start()
     server = ThreadingHTTPServer(("127.0.0.1", 8000), Handler)
