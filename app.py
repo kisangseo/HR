@@ -2,10 +2,17 @@ from __future__ import annotations
 
 import csv
 import io
+import imaplib
 import json
 import os
+import re
+import threading
+import time
 from collections import Counter
 from datetime import datetime, timezone
+from email import message_from_bytes
+from email.message import Message
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -18,6 +25,15 @@ except ImportError:  # pragma: no cover
 ROOT = Path(__file__).resolve().parent
 APP_VERSION = "2026-04-27.ingest-diagnostics-v3"
 SQL_CONNECTION_STRING = os.getenv("HR_SQL_CONNECTION_STRING", "").strip()
+EMAIL_POLL_ENABLED = os.getenv("HR_EMAIL_POLL_ENABLED", "false").lower() == "true"
+EMAIL_IMAP_HOST = os.getenv("HR_IMAP_HOST", "outlook.office365.com")
+EMAIL_IMAP_PORT = int(os.getenv("HR_IMAP_PORT", "993"))
+EMAIL_IMAP_USER = os.getenv("HR_IMAP_USER", "noreply@baltimorecitysheriff.gov")
+EMAIL_IMAP_PASSWORD = os.getenv("HR_IMAP_PASSWORD", "")
+EMAIL_IMAP_MAILBOX = os.getenv("HR_IMAP_MAILBOX", "INBOX")
+EMAIL_IMAP_PROCESSED_MAILBOX = os.getenv("HR_IMAP_PROCESSED_MAILBOX", "Processed")
+EMAIL_SUBJECT_KEYWORD = os.getenv("HR_EMAIL_SUBJECT_KEYWORD", "Job Application Form")
+EMAIL_POLL_SECONDS = int(os.getenv("HR_EMAIL_POLL_SECONDS", "60"))
 
 INDEX_HTML = ROOT / "index.html"
 STATIC_JS = ROOT / "app.js"
@@ -241,6 +257,112 @@ def map_row(raw_row: dict[str, str]) -> tuple[dict[str, Any] | None, list[str]]:
     }, errors
 
 
+def extract_email_fields(email_text: str) -> dict[str, str]:
+    lines = [line.strip() for line in email_text.splitlines()]
+    lines = [line for line in lines if line]
+    labels = {
+        "name": "Name",
+        "email": "Email",
+        "phone": "Phone Number",
+        "primary": "Primary Position You Are Applying For",
+        "other": "Other Interested Positions",
+    }
+    output: dict[str, str] = {}
+    for idx, line in enumerate(lines):
+        for key, label in labels.items():
+            if line.lower() == label.lower():
+                # take next non-empty line as value
+                for next_idx in range(idx + 1, len(lines)):
+                    candidate = lines[next_idx].strip()
+                    if candidate and candidate.lower() not in {v.lower() for v in labels.values()}:
+                        output[key] = candidate
+                        break
+    return output
+
+
+def get_message_body(msg: Message) -> str:
+    if msg.is_multipart():
+        plain_part = None
+        html_part = None
+        for part in msg.walk():
+            content_type = part.get_content_type()
+            if part.get_content_maintype() == "multipart":
+                continue
+            payload = part.get_payload(decode=True) or b""
+            charset = part.get_content_charset() or "utf-8"
+            try:
+                text = payload.decode(charset, errors="replace")
+            except LookupError:
+                text = payload.decode("utf-8", errors="replace")
+            if content_type == "text/plain" and not plain_part:
+                plain_part = text
+            elif content_type == "text/html" and not html_part:
+                html_part = text
+        body = plain_part or html_part or ""
+    else:
+        payload = msg.get_payload(decode=True) or b""
+        charset = msg.get_content_charset() or "utf-8"
+        try:
+            body = payload.decode(charset, errors="replace")
+        except LookupError:
+            body = payload.decode("utf-8", errors="replace")
+
+    if "<" in body and ">" in body:
+        body = re.sub(r"<br\\s*/?>", "\n", body, flags=re.IGNORECASE)
+        body = re.sub(r"</p\\s*>", "\n", body, flags=re.IGNORECASE)
+        body = re.sub(r"<[^>]+>", " ", body)
+    return body
+
+
+def build_record_from_email(fields: dict[str, str], submitted_at: str, raw_payload: dict[str, Any]) -> dict[str, Any] | None:
+    full_name = fields.get("name", "").strip()
+    if not full_name:
+        return None
+
+    name_parts = full_name.split(maxsplit=1)
+    first_name = name_parts[0]
+    last_name = name_parts[1] if len(name_parts) > 1 else ""
+    primary = fields.get("primary", "").strip()
+    other_values = split_multi_value(fields.get("other", ""))
+    other_values = [value for value in other_values if value.lower() != primary.lower()]
+
+    return {
+        "submitted_at": submitted_at,
+        "first_name": first_name,
+        "last_name": last_name,
+        "full_name": full_name,
+        "email": fields.get("email", "").strip(),
+        "phone": normalize_phone(fields.get("phone", "")),
+        "primary_position": primary,
+        "other_positions": other_values,
+        "status": "interest_submitted",
+        "source": "email_interest_form",
+        "raw_payload": raw_payload,
+    }
+
+
+def insert_mapped_record(cursor, mapped: dict[str, Any]) -> None:
+    cursor.execute(
+        """
+        INSERT INTO job_applications (
+            submitted_at, first_name, last_name, email, phone,
+            primary_position, other_positions, status, source, raw_payload
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            mapped["submitted_at"],
+            mapped["first_name"],
+            mapped["last_name"],
+            mapped["email"],
+            mapped["phone"],
+            mapped["primary_position"],
+            json.dumps(mapped["other_positions"]),
+            mapped["status"],
+            mapped["source"],
+            json.dumps(mapped["raw_payload"]),
+        ),
+    )
+
 def ingest_csv(csv_text: str) -> dict[str, Any]:
     clean_text = csv_text.replace("\x00", "")
     sample = clean_text[:4096]
@@ -314,26 +436,7 @@ def ingest_csv(csv_text: str) -> dict[str, Any]:
                 continue
             seen_row_fingerprints.add(fingerprint)
 
-            cursor.execute(
-                """
-                INSERT INTO job_applications (
-                    submitted_at, first_name, last_name, email, phone,
-                    primary_position, other_positions, status, source, raw_payload
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    mapped["submitted_at"],
-                    mapped["first_name"],
-                    mapped["last_name"],
-                    mapped["email"],
-                    mapped["phone"],
-                    mapped["primary_position"],
-                    json.dumps(mapped["other_positions"]),
-                    mapped["status"],
-                    mapped["source"],
-                    json.dumps(mapped["raw_payload"]),
-                ),
-            )
+            insert_mapped_record(cursor, mapped)
             inserted += 1
             if row_errors:
                 errors.append(
@@ -481,6 +584,78 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
     return output
 
 
+def poll_interest_form_emails_forever() -> None:
+    if not EMAIL_IMAP_PASSWORD:
+        print("Email poller disabled: HR_IMAP_PASSWORD is not set.")
+        return
+
+    print(f"Email poller started for mailbox {EMAIL_IMAP_USER} ({EMAIL_IMAP_MAILBOX}).")
+    while True:
+        try:
+            with imaplib.IMAP4_SSL(EMAIL_IMAP_HOST, EMAIL_IMAP_PORT) as client:
+                client.login(EMAIL_IMAP_USER, EMAIL_IMAP_PASSWORD)
+                client.select(EMAIL_IMAP_MAILBOX)
+                status, data = client.search(None, f'(UNSEEN SUBJECT "{EMAIL_SUBJECT_KEYWORD}")')
+                if status != "OK":
+                    time.sleep(EMAIL_POLL_SECONDS)
+                    continue
+
+                message_ids = data[0].split()
+                if not message_ids:
+                    time.sleep(EMAIL_POLL_SECONDS)
+                    continue
+
+                with get_sql_connection() as conn:
+                    cursor = conn.cursor()
+                    for message_id in message_ids:
+                        fetch_status, payload = client.fetch(message_id, "(RFC822)")
+                        if fetch_status != "OK" or not payload or not payload[0]:
+                            continue
+                        msg = message_from_bytes(payload[0][1])
+                        body = get_message_body(msg)
+                        fields = extract_email_fields(body)
+                        if not fields:
+                            client.store(message_id, "+FLAGS", "(\\Seen)")
+                            continue
+
+                        date_header = msg.get("Date", "")
+                        parsed_date = None
+                        if date_header:
+                            try:
+                                parsed_date = parsedate_to_datetime(date_header)
+                            except Exception:
+                                parsed_date = None
+                        submitted_at = (
+                            parsed_date.date().isoformat()
+                            if parsed_date else datetime.now(timezone.utc).date().isoformat()
+                        )
+
+                        mapped = build_record_from_email(
+                            fields,
+                            submitted_at=submitted_at,
+                            raw_payload={"subject": msg.get("Subject", ""), "fields": fields},
+                        )
+                        if not mapped or contains_test_name(mapped["full_name"]):
+                            client.store(message_id, "+FLAGS", "(\\Seen)")
+                            if EMAIL_IMAP_PROCESSED_MAILBOX:
+                                client.copy(message_id, EMAIL_IMAP_PROCESSED_MAILBOX)
+                                client.store(message_id, "+FLAGS", "(\\Deleted)")
+                            continue
+
+                        insert_mapped_record(cursor, mapped)
+                        client.store(message_id, "+FLAGS", "(\\Seen)")
+                        if EMAIL_IMAP_PROCESSED_MAILBOX:
+                            client.copy(message_id, EMAIL_IMAP_PROCESSED_MAILBOX)
+                            client.store(message_id, "+FLAGS", "(\\Deleted)")
+                    if EMAIL_IMAP_PROCESSED_MAILBOX:
+                        client.expunge()
+                    conn.commit()
+
+        except Exception as exc:
+            print(f"Email poller error: {exc}")
+        time.sleep(EMAIL_POLL_SECONDS)
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send_json(self, payload: Any, code: int = 200) -> None:
         body = json.dumps(payload).encode("utf-8")
@@ -558,6 +733,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def run() -> None:
+    if EMAIL_POLL_ENABLED:
+        thread = threading.Thread(target=poll_interest_form_emails_forever, daemon=True)
+        thread.start()
     server = ThreadingHTTPServer(("127.0.0.1", 8000), Handler)
     print("HR app running at http://127.0.0.1:8000")
     server.serve_forever()

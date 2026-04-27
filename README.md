@@ -27,11 +27,22 @@ This version runs ingest/query directly against SQL Server so the web app and yo
 - UI uses short labels for selected positions (`Court Security Officer` -> `CSO`, `Deputy Sheriff` -> `Deputy`, `Information Technology` -> `IT`)
 - Records with names containing `test` are excluded from ingest/display
 - Same-name applicants are merged in API response and positions are unioned for display
+- Optional IMAP poller can auto-ingest emails sent to `noreply@baltimorecitysheriff.gov` when subject includes `Job Application Form`
 
 ## Run
 
 ```bash
 export HR_SQL_CONNECTION_STRING="Driver={ODBC Driver 18 for SQL Server};Server=tcp:YOUR_SERVER.database.windows.net,1433;Database=YOUR_DB;Uid=YOUR_USER;Pwd=YOUR_PASSWORD;Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;"
+# optional email auto-ingest
+export HR_EMAIL_POLL_ENABLED=true
+export HR_IMAP_HOST=outlook.office365.com
+export HR_IMAP_PORT=993
+export HR_IMAP_USER=noreply@baltimorecitysheriff.gov
+export HR_IMAP_PASSWORD=YOUR_EMAIL_PASSWORD
+export HR_IMAP_MAILBOX=INBOX
+export HR_IMAP_PROCESSED_MAILBOX=Processed
+export HR_EMAIL_SUBJECT_KEYWORD="Job Application Form"
+export HR_EMAIL_POLL_SECONDS=60
 python3 app.py
 ```
 
