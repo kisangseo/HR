@@ -41,6 +41,7 @@ GRAPH_CLIENT_ID = os.getenv("HR_GRAPH_CLIENT_ID", "").strip()
 GRAPH_CLIENT_SECRET = os.getenv("HR_GRAPH_CLIENT_SECRET", "").strip()
 GRAPH_MAILBOX = os.getenv("HR_GRAPH_MAILBOX", "noreply@baltimorecitysheriff.gov").strip()
 GRAPH_PROCESSED_FOLDER = os.getenv("HR_GRAPH_PROCESSED_FOLDER", "Processed").strip()
+MAKE_WEBHOOK_TOKEN = os.getenv("HR_MAKE_WEBHOOK_TOKEN", "").strip()
 
 INDEX_HTML = ROOT / "index.html"
 STATIC_JS = ROOT / "app.js"
@@ -369,6 +370,71 @@ def insert_mapped_record(cursor, mapped: dict[str, Any]) -> None:
             json.dumps(mapped["raw_payload"]),
         ),
     )
+
+
+def parse_json_body(raw_body: str) -> dict[str, Any]:
+    payload = json.loads(raw_body)
+    if not isinstance(payload, dict):
+        raise ValueError("JSON body must be an object.")
+    return payload
+
+
+def build_record_from_make(payload: dict[str, Any]) -> dict[str, Any] | None:
+    full_name = str(
+        payload.get("name")
+        or payload.get("full_name")
+        or payload.get("applicant_name")
+        or ""
+    ).strip()
+    first_name = str(payload.get("first_name") or "").strip()
+    last_name = str(payload.get("last_name") or "").strip()
+    if not full_name:
+        full_name = " ".join(part for part in [first_name, last_name] if part).strip()
+    if not full_name:
+        return None
+
+    if not first_name and not last_name:
+        parts = full_name.split(maxsplit=1)
+        first_name = parts[0]
+        last_name = parts[1] if len(parts) > 1 else ""
+
+    submitted_raw = str(
+        payload.get("submission_date")
+        or payload.get("submitted_at")
+        or payload.get("date")
+        or ""
+    ).strip()
+    submitted_at = parse_submitted_at(submitted_raw) if submitted_raw else None
+    if not submitted_at:
+        submitted_at = datetime.now(timezone.utc).date().isoformat()
+
+    primary_position = str(
+        payload.get("primary_position")
+        or payload.get("job_title")
+        or payload.get("primary")
+        or ""
+    ).strip()
+
+    other_raw = payload.get("other_positions") or payload.get("other_interested_positions") or []
+    if isinstance(other_raw, list):
+        other_positions = [str(value).strip() for value in other_raw if str(value).strip()]
+    else:
+        other_positions = split_multi_value(str(other_raw))
+    other_positions = [value for value in other_positions if value.lower() != primary_position.lower()]
+
+    return {
+        "submitted_at": submitted_at,
+        "first_name": first_name,
+        "last_name": last_name,
+        "full_name": full_name,
+        "email": str(payload.get("email") or "").strip(),
+        "phone": normalize_phone(str(payload.get("phone") or payload.get("phone_number") or "")),
+        "primary_position": primary_position,
+        "other_positions": other_positions,
+        "status": "interest_submitted",
+        "source": "make_webhook",
+        "raw_payload": payload,
+    }
 
 def ingest_csv(csv_text: str) -> dict[str, Any]:
     clean_text = csv_text.replace("\x00", "")
@@ -866,6 +932,36 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path == "/api/ingest-interest-form":
+            content_length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(content_length).decode("utf-8")
+            if not body.strip():
+                self._send_json({"error": "JSON payload is empty."}, 400)
+                return
+
+            provided_token = self.headers.get("X-Webhook-Token", "")
+            if MAKE_WEBHOOK_TOKEN and provided_token != MAKE_WEBHOOK_TOKEN:
+                self._send_json({"error": "Unauthorized webhook token."}, 401)
+                return
+
+            try:
+                payload = parse_json_body(body)
+                mapped = build_record_from_make(payload)
+                if not mapped:
+                    self._send_json({"error": "Could not parse applicant name from payload."}, 400)
+                    return
+                if contains_test_name(mapped["full_name"]):
+                    self._send_json({"inserted": 0, "skipped": 1, "reason": "Name contains 'test'."})
+                    return
+                with get_sql_connection() as conn:
+                    cursor = conn.cursor()
+                    insert_mapped_record(cursor, mapped)
+                    conn.commit()
+                self._send_json({"inserted": 1, "source": "make_webhook"})
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, 500)
+            return
+
         if parsed.path != "/api/ingest-csv":
             self.send_error(404)
             return

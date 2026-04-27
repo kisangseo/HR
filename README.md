@@ -29,6 +29,7 @@ This version runs ingest/query directly against SQL Server so the web app and yo
 - Same-name applicants are merged in API response and positions are unioned for display
 - Optional IMAP poller can auto-ingest emails sent to `noreply@baltimorecitysheriff.gov` when subject includes `Job Application Form`
 - Optional Microsoft Graph poller (recommended for MFA tenants) can auto-ingest the same emails using app credentials
+- Optional MAKE webhook endpoint (`POST /api/ingest-interest-form`) to ingest parsed interest forms directly
 
 ## Run
 
@@ -50,10 +51,28 @@ export HR_GRAPH_CLIENT_ID=YOUR_CLIENT_ID
 export HR_GRAPH_CLIENT_SECRET=YOUR_CLIENT_SECRET_VALUE
 export HR_GRAPH_MAILBOX=noreply@baltimorecitysheriff.gov
 export HR_GRAPH_PROCESSED_FOLDER=Processed
+# optional webhook auth for MAKE
+export HR_MAKE_WEBHOOK_TOKEN=YOUR_SHARED_TOKEN
 python3 app.py
 ```
 
 Then open `http://127.0.0.1:8000`.
+
+## MAKE webhook setup
+
+1. In MAKE, create scenario with trigger (email or form source).
+2. Add an HTTP module:
+   - Method: `POST`
+   - URL: `http://YOUR_HOST:8000/api/ingest-interest-form`
+   - Headers: `Content-Type: application/json`
+   - Optional auth header: `X-Webhook-Token: <HR_MAKE_WEBHOOK_TOKEN>`
+3. Send JSON body with fields like:
+   - `name`
+   - `email`
+   - `phone` (or `phone_number`)
+   - `primary_position` (or `job_title`)
+   - `other_positions` (array or comma-separated string)
+   - `submission_date` (optional; fallback is current UTC date)
 
 ## Notes about your conditional position fields
 
