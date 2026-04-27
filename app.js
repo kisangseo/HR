@@ -5,7 +5,6 @@ const state = {
 const els = {
   csvFile: document.getElementById('csvFile'),
   loadCsvBtn: document.getElementById('loadCsvBtn'),
-  clearApplicantsBtn: document.getElementById('clearApplicantsBtn'),
   ingestStatus: document.getElementById('ingestStatus'),
   ingestDetails: document.getElementById('ingestDetails'),
   nameFilter: document.getElementById('nameFilter'),
@@ -49,27 +48,6 @@ els.loadCsvBtn.addEventListener('click', async () => {
   } catch (error) {
     setStatus(error.message, true);
     els.ingestDetails.textContent = '';
-  }
-});
-
-els.clearApplicantsBtn.addEventListener('click', async () => {
-  const confirmed = window.confirm('Clear all applicants from this local app database?');
-  if (!confirmed) {
-    return;
-  }
-
-  try {
-    const response = await fetch('/api/clear-applicants', { method: 'POST' });
-    const result = await response.json();
-    if (!response.ok) {
-      throw new Error(result.error || 'Could not clear applicants.');
-    }
-
-    await loadApplicants();
-    setStatus(`Cleared ${result.deleted || 0} applicants from local SQLite.`, false);
-    els.ingestDetails.textContent = 'Tip: This clears the local hr.db used by python3 app.py.';
-  } catch (error) {
-    setStatus(error.message, true);
   }
 });
 

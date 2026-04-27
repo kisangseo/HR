@@ -3,17 +3,21 @@ from __future__ import annotations
 import csv
 import io
 import json
-import sqlite3
+import os
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+try:
+    import pyodbc
+except ImportError:  # pragma: no cover
+    pyodbc = None
 
 ROOT = Path(__file__).resolve().parent
-DB_PATH = ROOT / "hr.db"
 APP_VERSION = "2026-04-24.ingest-diagnostics-v2"
+SQL_CONNECTION_STRING = os.getenv("HR_SQL_CONNECTION_STRING", "").strip()
 
 INDEX_HTML = ROOT / "index.html"
 STATIC_JS = ROOT / "app.js"
@@ -35,38 +39,14 @@ ALIASES = {
     ],
 }
 
-
-def init_db() -> None:
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS job_applications (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                submitted_at TEXT NOT NULL,
-                first_name TEXT,
-                last_name TEXT,
-                full_name TEXT NOT NULL,
-                email TEXT,
-                phone TEXT,
-                primary_position TEXT NOT NULL,
-                other_positions TEXT NOT NULL DEFAULT '[]',
-                status TEXT NOT NULL DEFAULT 'interest_submitted',
-                source TEXT NOT NULL DEFAULT 'csv',
-                raw_payload TEXT,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            """
+def get_sql_connection():
+    if pyodbc is None:
+        raise RuntimeError(
+            "pyodbc is not installed. Install it and set HR_SQL_CONNECTION_STRING to connect to SQL Server."
         )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_job_applications_submitted_at ON job_applications(submitted_at DESC)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_job_applications_name ON job_applications(full_name)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_job_applications_primary_position ON job_applications(primary_position)"
-        )
+    if not SQL_CONNECTION_STRING:
+        raise RuntimeError("HR_SQL_CONNECTION_STRING is not set.")
+    return pyodbc.connect(SQL_CONNECTION_STRING)
 
 
 def normalize_key(value: str) -> str:
@@ -238,7 +218,8 @@ def ingest_csv(csv_text: str) -> dict[str, Any]:
     fieldnames = [normalize_key(name or "") for name in (reader.fieldnames or [])]
     delimiter = getattr(dialect, "delimiter", ",")
 
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_sql_connection() as conn:
+        cursor = conn.cursor()
         for index, raw_row in enumerate(reader, start=2):
             if raw_row is None:
                 skipped += 1
@@ -257,7 +238,7 @@ def ingest_csv(csv_text: str) -> dict[str, Any]:
                 )
                 continue
 
-            conn.execute(
+            cursor.execute(
                 """
                 INSERT INTO job_applications (
                     submitted_at, first_name, last_name, full_name, email, phone,
@@ -287,6 +268,7 @@ def ingest_csv(csv_text: str) -> dict[str, Any]:
                         "details": row_errors,
                     }
                 )
+        conn.commit()
 
     if parsed_rows == 0:
         errors.append(
@@ -344,11 +326,11 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
     params: list[str] = []
 
     if filters.get("name"):
-        sql += " AND lower(full_name) LIKE ?"
+        sql += " AND LOWER(full_name) LIKE ?"
         params.append(f"%{filters['name'].lower()}%")
 
     if filters.get("job_title"):
-        sql += " AND lower(primary_position) LIKE ?"
+        sql += " AND LOWER(primary_position) LIKE ?"
         params.append(f"%{filters['job_title'].lower()}%")
 
     if filters.get("date_from"):
@@ -361,34 +343,26 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
 
     sql += " ORDER BY submitted_at DESC"
 
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(sql, params).fetchall()
+    with get_sql_connection() as conn:
+        cursor = conn.cursor()
+        rows = cursor.execute(sql, params).fetchall()
 
     output: list[dict[str, Any]] = []
     for row in rows:
         output.append(
             {
-                "id": row["id"],
-                "submittedAt": row["submitted_at"],
-                "name": row["full_name"],
-                "email": row["email"],
-                "phone": row["phone"],
-                "primaryPosition": row["primary_position"],
-                "otherPositions": json.loads(row["other_positions"] or "[]"),
-                "status": row["status"],
-                "source": row["source"],
+                "id": row[0],
+                "submittedAt": str(row[1]),
+                "name": row[2],
+                "email": row[3],
+                "phone": row[4],
+                "primaryPosition": row[5],
+                "otherPositions": json.loads(row[6] or "[]"),
+                "status": row[7],
+                "source": row[8],
             }
         )
     return output
-
-
-def clear_applicants() -> dict[str, int]:
-    with sqlite3.connect(DB_PATH) as conn:
-        deleted = conn.execute("SELECT COUNT(*) FROM job_applications").fetchone()[0]
-        conn.execute("DELETE FROM job_applications")
-        conn.execute("DELETE FROM sqlite_sequence WHERE name = 'job_applications'")
-    return {"deleted": deleted}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -434,23 +408,21 @@ class Handler(BaseHTTPRequestHandler):
                 "date_from": (query.get("date_from") or [""])[0],
                 "date_to": (query.get("date_to") or [""])[0],
             }
-            data = query_applicants(filters)
-            self._send_json({"applicants": data})
+            try:
+                data = query_applicants(filters)
+                self._send_json({"applicants": data})
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, 500)
             return
 
         if parsed.path == "/api/version":
-            self._send_json({"app_version": APP_VERSION})
+            self._send_json({"app_version": APP_VERSION, "db_backend": "sqlserver"})
             return
 
         self.send_error(404)
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
-        if parsed.path == "/api/clear-applicants":
-            result = clear_applicants()
-            self._send_json(result)
-            return
-
         if parsed.path != "/api/ingest-csv":
             self.send_error(404)
             return
@@ -462,12 +434,14 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "CSV payload is empty."}, 400)
             return
 
-        result = ingest_csv(body)
-        self._send_json(result)
+        try:
+            result = ingest_csv(body)
+            self._send_json(result)
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, 500)
 
 
 def run() -> None:
-    init_db()
     server = ThreadingHTTPServer(("127.0.0.1", 8000), Handler)
     print("HR app running at http://127.0.0.1:8000")
     server.serve_forever()

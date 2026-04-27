@@ -1,10 +1,10 @@
 # HR Job Applicants MVP
 
-This version moves the ingest logic into Python so future workflow functions can be added server-side.
+This version runs ingest/query directly against SQL Server so the web app and your SQL database stay in sync.
 
 ## Stack
 
-- `app.py`: Python HTTP server + API + SQLite persistence
+- `app.py`: Python HTTP server + API + SQL Server persistence (via `pyodbc`)
 - `index.html`, `styles.css`, `app.js`: UI for upload, search, and table rendering
 - `schema.sql`: SQL Server / Azure Data Studio-ready schema for `job_applications`
 
@@ -13,7 +13,7 @@ This version moves the ingest logic into Python so future workflow functions can
 - Ingest CSV submissions via `POST /api/ingest-csv`
 - Auto-detect delimiter for CSV-like exports (comma, tab, semicolon, pipe)
 - Normalize duplicate/conditional "Other Interested Positions" source columns
-- Persist applicant records to local SQLite (`hr.db`)
+- Persist applicant records to SQL Server (`job_applications`)
 - Return ingest diagnostics (detected delimiter, detected headers, row-level warnings/skips)
 - Search applicants via `GET /api/applicants` filters:
   - `name`
@@ -21,18 +21,15 @@ This version moves the ingest logic into Python so future workflow functions can
   - `date_to`
   - `job_title`
 - Debug server build with `GET /api/version`
-- Clear local data with `POST /api/clear-applicants`
 
 ## Run
 
 ```bash
+export HR_SQL_CONNECTION_STRING="Driver={ODBC Driver 18 for SQL Server};Server=tcp:YOUR_SERVER.database.windows.net,1433;Database=YOUR_DB;Uid=YOUR_USER;Pwd=YOUR_PASSWORD;Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;"
 python3 app.py
 ```
 
 Then open `http://127.0.0.1:8000`.
-
-> Note: the running app uses local SQLite (`hr.db`) for ingest/query.
-> `schema.sql` is for SQL Server deployment/migration, not the live local runtime.
 
 ## Notes about your conditional position fields
 
