@@ -257,15 +257,14 @@ def ingest_csv(csv_text: str) -> dict[str, Any]:
             cursor.execute(
                 """
                 INSERT INTO job_applications (
-                    submitted_at, first_name, last_name, full_name, email, phone,
+                    submitted_at, first_name, last_name, email, phone,
                     primary_position, other_positions, status, source, raw_payload
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     mapped["submitted_at"],
                     mapped["first_name"],
                     mapped["last_name"],
-                    mapped["full_name"],
                     mapped["email"],
                     mapped["phone"],
                     mapped["primary_position"],
