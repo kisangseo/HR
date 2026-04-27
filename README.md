@@ -36,7 +36,7 @@ Then open `http://127.0.0.1:8000`.
 ## Notes about your conditional position fields
 
 When multiple duplicate "Other Interested Positions" columns exist in a CSV export,
-only the first non-empty value is used during normalization, and empty duplicate columns are ignored.
+all non-empty values across those columns are collected, deduplicated, and primary position is excluded.
 
 If a submission date is malformed/missing (for example spreadsheet-export placeholders like `########`),
 ingest falls back to the current timestamp so records are not dropped.

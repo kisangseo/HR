@@ -16,7 +16,7 @@ except ImportError:  # pragma: no cover
     pyodbc = None
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = "2026-04-24.ingest-diagnostics-v2"
+APP_VERSION = "2026-04-27.ingest-diagnostics-v3"
 SQL_CONNECTION_STRING = os.getenv("HR_SQL_CONNECTION_STRING", "").strip()
 
 INDEX_HTML = ROOT / "index.html"
@@ -123,17 +123,23 @@ def normalize_phone(raw_phone: str) -> str:
 
 
 def extract_other_positions(row: dict[str, str], primary_position: str) -> list[str]:
-    keys = [
-        key
-        for key in row.keys()
-        if "other interested positions" in key or "other positions" in key
-    ]
+    keys = []
+    for key in row.keys():
+        key_lower = key.lower()
+        if (
+            "other interested positions" in key_lower
+            or "other positions" in key_lower
+            or key_lower.startswith("other inte")
+        ):
+            keys.append(key)
     values = [row[key].strip() for key in keys if row[key].strip()]
 
     if not values:
         return []
 
-    selected = split_multi_value(values[0])
+    selected: list[str] = []
+    for value in values:
+        selected.extend(split_multi_value(value))
     primary_normalized = primary_position.strip().lower()
 
     deduped: list[str] = []
