@@ -136,6 +136,16 @@ def normalize_phone(raw_phone: str) -> str:
     return digits
 
 
+def contains_test_name(full_name: str) -> bool:
+    return "test" in (full_name or "").lower()
+
+
+def canonical_positions(primary_position: str, other_positions: list[str]) -> tuple[str, tuple[str, ...]]:
+    primary = (primary_position or "").strip()
+    cleaned_other = sorted({(value or "").strip() for value in other_positions if (value or "").strip()})
+    return primary.lower(), tuple(value.lower() for value in cleaned_other)
+
+
 def extract_other_positions(row: dict[str, str], primary_position: str) -> list[str]:
     keys = []
     for key in row.keys():
@@ -252,6 +262,7 @@ def ingest_csv(csv_text: str) -> dict[str, Any]:
     errors: list[dict[str, Any]] = []
     fieldnames = [normalize_key(name or "") for name in original_headers]
     delimiter = getattr(dialect, "delimiter", ",")
+    seen_row_fingerprints: set[tuple[str, str, tuple[str, ...]]] = set()
 
     with get_sql_connection() as conn:
         cursor = conn.cursor()
@@ -275,6 +286,33 @@ def ingest_csv(csv_text: str) -> dict[str, Any]:
                     }
                 )
                 continue
+
+            if contains_test_name(mapped["full_name"]):
+                skipped += 1
+                errors.append(
+                    {
+                        "row": index,
+                        "reason": "Record not ingested.",
+                        "details": ["Name contains 'test' and was excluded."],
+                    }
+                )
+                continue
+
+            fingerprint = (
+                mapped["full_name"].strip().lower(),
+                *canonical_positions(mapped["primary_position"], mapped["other_positions"]),
+            )
+            if fingerprint in seen_row_fingerprints:
+                skipped += 1
+                errors.append(
+                    {
+                        "row": index,
+                        "reason": "Record not ingested.",
+                        "details": ["Exact duplicate in CSV batch was excluded."],
+                    }
+                )
+                continue
+            seen_row_fingerprints.add(fingerprint)
 
             cursor.execute(
                 """
@@ -384,14 +422,14 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
         cursor = conn.cursor()
         rows = cursor.execute(sql, params).fetchall()
 
-    output: list[dict[str, Any]] = []
+    raw_output: list[dict[str, Any]] = []
     for row in rows:
         submitted_value = row[1]
         if hasattr(submitted_value, "date"):
             submitted_text = submitted_value.date().isoformat()
         else:
             submitted_text = str(submitted_value)[:10]
-        output.append(
+        raw_output.append(
             {
                 "id": row[0],
                 "submittedAt": submitted_text,
@@ -404,6 +442,42 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
                 "source": row[8],
             }
         )
+    # Smart presentation layer:
+    # - remove names containing "test"
+    # - combine same-name applicants into one row, merging positions
+    grouped: dict[str, dict[str, Any]] = {}
+    for item in raw_output:
+        if contains_test_name(item["name"]):
+            continue
+        key = item["name"].strip().lower()
+        if key not in grouped:
+            grouped[key] = {
+                **item,
+                "allPositions": set([item["primaryPosition"]]) | set(item["otherPositions"]),
+            }
+            continue
+
+        existing = grouped[key]
+        existing["allPositions"].update([item["primaryPosition"]])
+        existing["allPositions"].update(item["otherPositions"])
+        # Keep latest submission date row as base
+        if item["submittedAt"] > existing["submittedAt"]:
+            existing["submittedAt"] = item["submittedAt"]
+            existing["primaryPosition"] = item["primaryPosition"]
+            existing["email"] = item["email"] or existing["email"]
+            existing["phone"] = item["phone"] or existing["phone"]
+
+    output: list[dict[str, Any]] = []
+    for merged in grouped.values():
+        all_positions = {p for p in merged["allPositions"] if p}
+        primary = merged["primaryPosition"]
+        if primary in all_positions:
+            all_positions.remove(primary)
+        merged["otherPositions"] = sorted(all_positions)
+        merged.pop("allPositions", None)
+        output.append(merged)
+
+    output.sort(key=lambda item: item["submittedAt"], reverse=True)
     return output
 
 

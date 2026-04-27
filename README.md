@@ -25,6 +25,8 @@ This version runs ingest/query directly against SQL Server so the web app and yo
   - `job_title`
 - Debug server build with `GET /api/version`
 - UI uses short labels for selected positions (`Court Security Officer` -> `CSO`, `Deputy Sheriff` -> `Deputy`, `Information Technology` -> `IT`)
+- Records with names containing `test` are excluded from ingest/display
+- Same-name applicants are merged in API response and positions are unioned for display
 
 ## Run
 
