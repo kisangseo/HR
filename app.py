@@ -15,6 +15,8 @@ from email.message import Message
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 from urllib.parse import parse_qs, urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 try:
@@ -34,6 +36,11 @@ EMAIL_IMAP_MAILBOX = os.getenv("HR_IMAP_MAILBOX", "INBOX")
 EMAIL_IMAP_PROCESSED_MAILBOX = os.getenv("HR_IMAP_PROCESSED_MAILBOX", "Processed")
 EMAIL_SUBJECT_KEYWORD = os.getenv("HR_EMAIL_SUBJECT_KEYWORD", "Job Application Form")
 EMAIL_POLL_SECONDS = int(os.getenv("HR_EMAIL_POLL_SECONDS", "60"))
+GRAPH_TENANT_ID = os.getenv("HR_GRAPH_TENANT_ID", "").strip()
+GRAPH_CLIENT_ID = os.getenv("HR_GRAPH_CLIENT_ID", "").strip()
+GRAPH_CLIENT_SECRET = os.getenv("HR_GRAPH_CLIENT_SECRET", "").strip()
+GRAPH_MAILBOX = os.getenv("HR_GRAPH_MAILBOX", "noreply@baltimorecitysheriff.gov").strip()
+GRAPH_PROCESSED_FOLDER = os.getenv("HR_GRAPH_PROCESSED_FOLDER", "Processed").strip()
 
 INDEX_HTML = ROOT / "index.html"
 STATIC_JS = ROOT / "app.js"
@@ -656,6 +663,150 @@ def poll_interest_form_emails_forever() -> None:
         time.sleep(EMAIL_POLL_SECONDS)
 
 
+def graph_request(
+    method: str,
+    url: str,
+    access_token: str,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    body = None
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json",
+    }
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = Request(url, data=body, headers=headers, method=method)
+    with urlopen(request, timeout=30) as response:
+        text = response.read().decode("utf-8")
+        return json.loads(text) if text else {}
+
+
+def graph_get_access_token() -> str:
+    if not GRAPH_TENANT_ID or not GRAPH_CLIENT_ID or not GRAPH_CLIENT_SECRET:
+        raise RuntimeError("Graph poller not configured: HR_GRAPH_TENANT_ID/CLIENT_ID/CLIENT_SECRET are required.")
+
+    token_url = f"https://login.microsoftonline.com/{quote(GRAPH_TENANT_ID)}/oauth2/v2.0/token"
+    form = (
+        "client_id=" + quote(GRAPH_CLIENT_ID)
+        + "&client_secret=" + quote(GRAPH_CLIENT_SECRET)
+        + "&scope=" + quote("https://graph.microsoft.com/.default")
+        + "&grant_type=client_credentials"
+    ).encode("utf-8")
+    request = Request(
+        token_url,
+        data=form,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    with urlopen(request, timeout=30) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    token = payload.get("access_token")
+    if not token:
+        raise RuntimeError(f"Could not fetch Graph access token: {payload}")
+    return token
+
+
+def graph_get_or_create_folder_id(access_token: str, mailbox: str, folder_name: str) -> str:
+    mailbox_q = quote(mailbox)
+    folder_q = folder_name.replace("'", "''")
+    list_url = (
+        f"https://graph.microsoft.com/v1.0/users/{mailbox_q}/mailFolders"
+        f"?$filter=displayName eq '{folder_q}'&$select=id,displayName"
+    )
+    listed = graph_request("GET", list_url, access_token)
+    values = listed.get("value", [])
+    if values:
+        return values[0]["id"]
+
+    created = graph_request(
+        "POST",
+        f"https://graph.microsoft.com/v1.0/users/{mailbox_q}/mailFolders",
+        access_token,
+        payload={"displayName": folder_name},
+    )
+    folder_id = created.get("id")
+    if not folder_id:
+        raise RuntimeError(f"Unable to create/find folder {folder_name}")
+    return folder_id
+
+
+def poll_interest_form_graph_forever() -> None:
+    print(f"Graph email poller started for mailbox {GRAPH_MAILBOX} (subject: {EMAIL_SUBJECT_KEYWORD}).")
+    processed_folder_id = ""
+    while True:
+        try:
+            access_token = graph_get_access_token()
+            if not processed_folder_id and GRAPH_PROCESSED_FOLDER:
+                processed_folder_id = graph_get_or_create_folder_id(access_token, GRAPH_MAILBOX, GRAPH_PROCESSED_FOLDER)
+
+            mailbox_q = quote(GRAPH_MAILBOX)
+            subject_q = EMAIL_SUBJECT_KEYWORD.replace("'", "''")
+            messages_url = (
+                f"https://graph.microsoft.com/v1.0/users/{mailbox_q}/mailFolders/inbox/messages"
+                f"?$select=id,subject,receivedDateTime,body,isRead"
+                f"&$top=50"
+                f"&$filter=isRead eq false and contains(subject,'{subject_q}')"
+                f"&$orderby=receivedDateTime asc"
+            )
+            result = graph_request("GET", messages_url, access_token)
+            messages = result.get("value", [])
+            if not messages:
+                time.sleep(EMAIL_POLL_SECONDS)
+                continue
+
+            with get_sql_connection() as conn:
+                cursor = conn.cursor()
+                for msg in messages:
+                    message_id = msg.get("id")
+                    body = (msg.get("body") or {}).get("content", "")
+                    fields = extract_email_fields(body)
+                    if not fields:
+                        graph_request(
+                            "PATCH",
+                            f"https://graph.microsoft.com/v1.0/users/{mailbox_q}/messages/{quote(message_id)}",
+                            access_token,
+                            payload={"isRead": True},
+                        )
+                        continue
+
+                    received = msg.get("receivedDateTime", "")
+                    submitted_at = datetime.now(timezone.utc).date().isoformat()
+                    if received:
+                        try:
+                            submitted_at = datetime.fromisoformat(received.replace("Z", "+00:00")).date().isoformat()
+                        except ValueError:
+                            submitted_at = datetime.now(timezone.utc).date().isoformat()
+
+                    mapped = build_record_from_email(
+                        fields,
+                        submitted_at=submitted_at,
+                        raw_payload={"subject": msg.get("subject", ""), "fields": fields},
+                    )
+                    if mapped and not contains_test_name(mapped["full_name"]):
+                        insert_mapped_record(cursor, mapped)
+
+                    if processed_folder_id:
+                        graph_request(
+                            "POST",
+                            f"https://graph.microsoft.com/v1.0/users/{mailbox_q}/messages/{quote(message_id)}/move",
+                            access_token,
+                            payload={"destinationId": processed_folder_id},
+                        )
+                    else:
+                        graph_request(
+                            "PATCH",
+                            f"https://graph.microsoft.com/v1.0/users/{mailbox_q}/messages/{quote(message_id)}",
+                            access_token,
+                            payload={"isRead": True},
+                        )
+                conn.commit()
+        except Exception as exc:
+            print(f"Graph email poller error: {exc}")
+        time.sleep(EMAIL_POLL_SECONDS)
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send_json(self, payload: Any, code: int = 200) -> None:
         body = json.dumps(payload).encode("utf-8")
@@ -734,7 +885,23 @@ class Handler(BaseHTTPRequestHandler):
 
 def run() -> None:
     if EMAIL_POLL_ENABLED:
-        thread = threading.Thread(target=poll_interest_form_emails_forever, daemon=True)
+        graph_ready = bool(GRAPH_TENANT_ID and GRAPH_CLIENT_ID and GRAPH_CLIENT_SECRET)
+        if graph_ready:
+            print("Email poller mode: GRAPH")
+            poller_target = poll_interest_form_graph_forever
+        else:
+            print("Email poller mode: IMAP (Graph vars missing)")
+            missing = []
+            if not GRAPH_TENANT_ID:
+                missing.append("HR_GRAPH_TENANT_ID")
+            if not GRAPH_CLIENT_ID:
+                missing.append("HR_GRAPH_CLIENT_ID")
+            if not GRAPH_CLIENT_SECRET:
+                missing.append("HR_GRAPH_CLIENT_SECRET")
+            if missing:
+                print("Missing Graph vars: " + ", ".join(missing))
+            poller_target = poll_interest_form_emails_forever
+        thread = threading.Thread(target=poller_target, daemon=True)
         thread.start()
     server = ThreadingHTTPServer(("127.0.0.1", 8000), Handler)
     print("HR app running at http://127.0.0.1:8000")

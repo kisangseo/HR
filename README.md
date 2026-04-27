@@ -28,6 +28,7 @@ This version runs ingest/query directly against SQL Server so the web app and yo
 - Records with names containing `test` are excluded from ingest/display
 - Same-name applicants are merged in API response and positions are unioned for display
 - Optional IMAP poller can auto-ingest emails sent to `noreply@baltimorecitysheriff.gov` when subject includes `Job Application Form`
+- Optional Microsoft Graph poller (recommended for MFA tenants) can auto-ingest the same emails using app credentials
 
 ## Run
 
@@ -43,6 +44,12 @@ export HR_IMAP_MAILBOX=INBOX
 export HR_IMAP_PROCESSED_MAILBOX=Processed
 export HR_EMAIL_SUBJECT_KEYWORD="Job Application Form"
 export HR_EMAIL_POLL_SECONDS=60
+# recommended Graph auth (if set, app uses Graph poller instead of IMAP)
+export HR_GRAPH_TENANT_ID=YOUR_TENANT_ID
+export HR_GRAPH_CLIENT_ID=YOUR_CLIENT_ID
+export HR_GRAPH_CLIENT_SECRET=YOUR_CLIENT_SECRET_VALUE
+export HR_GRAPH_MAILBOX=noreply@baltimorecitysheriff.gov
+export HR_GRAPH_PROCESSED_FOLDER=Processed
 python3 app.py
 ```
 
