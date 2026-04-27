@@ -24,6 +24,7 @@ This version runs ingest/query directly against SQL Server so the web app and yo
   - `date_to`
   - `job_title`
 - Debug server build with `GET /api/version`
+- UI uses short labels for selected positions (`Court Security Officer` -> `CSO`, `Deputy Sheriff` -> `Deputy`, `Information Technology` -> `IT`)
 
 ## Run
 

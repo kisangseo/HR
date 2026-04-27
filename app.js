@@ -86,17 +86,29 @@ function renderTable(applicants) {
 
   els.applicantRows.innerHTML = applicants
     .map((applicant) => {
-      const other = applicant.otherPositions?.length ? applicant.otherPositions.join(', ') : '—';
+      const primary = shortenPosition(applicant.primaryPosition || '—');
+      const other = applicant.otherPositions?.length
+        ? applicant.otherPositions.map(shortenPosition).join(', ')
+        : '—';
       return `<tr>
         <td>${escapeHtml(applicant.name)}</td>
         <td>${formatDate(applicant.submittedAt)}</td>
-        <td>${escapeHtml(applicant.primaryPosition || '—')}</td>
+        <td>${escapeHtml(primary)}</td>
         <td>${escapeHtml(other)}</td>
         <td>${escapeHtml(applicant.email || '—')}</td>
         <td>${escapeHtml(applicant.phone || '—')}</td>
       </tr>`;
     })
     .join('');
+}
+
+function shortenPosition(value) {
+  const text = String(value || '').trim();
+  const key = text.toLowerCase();
+  if (key === 'court security officer') return 'CSO';
+  if (key === 'deputy sheriff') return 'Deputy';
+  if (key === 'information technology') return 'IT';
+  return text || '—';
 }
 
 function formatDate(value) {
