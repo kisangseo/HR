@@ -77,7 +77,7 @@ def normalize_key(value: str) -> str:
 
 def strip_sent_from_suffix(value: str) -> str:
     return re.sub(
-        r"(?is)\s*sent from the baltimore city sheriff'?s office.*$",
+        r"(?is)\s*sent from the baltimore city sheriff[’']?s office.*$",
         "",
         (value or "").strip(),
     ).strip(" ,;-")
@@ -85,6 +85,8 @@ def strip_sent_from_suffix(value: str) -> str:
 
 def split_positions_text(value: str) -> list[str]:
     text = strip_sent_from_suffix(value)
+    if text in {"—", "-", "--"}:
+        return []
     if not text:
         return []
     if "," in text or ";" in text or "|" in text:
@@ -97,6 +99,8 @@ def split_positions_text(value: str) -> list[str]:
     for part in base_parts:
         key = " ".join((part or "").strip().lower().split())
         if not key:
+            continue
+        if key in {"—", "-", "--"}:
             continue
         normalized.append(POSITION_CANONICAL.get(key, part.strip()))
     return normalized
@@ -574,19 +578,22 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
     # - combine same-name applicants into one row, merging positions
     grouped: dict[str, dict[str, Any]] = {}
     for item in raw_output:
+        if not (item.get("name") or "").strip():
+            continue
         if contains_test_name(item["name"]):
             continue
         key = item["name"].strip().lower()
         if key not in grouped:
+            initial_positions = {p for p in [item["primaryPosition"], *item["otherPositions"]] if p and p != "—"}
             grouped[key] = {
                 **item,
-                "allPositions": set([item["primaryPosition"]]) | set(item["otherPositions"]),
+                "allPositions": initial_positions,
             }
             continue
 
         existing = grouped[key]
-        existing["allPositions"].update([item["primaryPosition"]])
-        existing["allPositions"].update(item["otherPositions"])
+        existing["allPositions"].update([p for p in [item["primaryPosition"]] if p and p != "—"])
+        existing["allPositions"].update([p for p in item["otherPositions"] if p and p != "—"])
         # Keep latest submission date row as base
         if item["submittedAt"] > existing["submittedAt"]:
             existing["submittedAt"] = item["submittedAt"]

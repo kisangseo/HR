@@ -100,9 +100,12 @@ function renderTable(applicants) {
 
   els.applicantRows.innerHTML = applicants
     .map((applicant) => {
-      const primary = shortenPosition(applicant.primaryPosition || '—');
+      const primary = shortenPosition(cleanDisplayPosition(applicant.primaryPosition || '—'));
       const other = applicant.otherPositions?.length
-        ? applicant.otherPositions.map(shortenPosition).join(', ')
+        ? applicant.otherPositions
+            .map((value) => shortenPosition(cleanDisplayPosition(value)))
+            .filter((value) => value && value !== '—')
+            .join(', ')
         : '—';
       return `<tr>
         <td>${escapeHtml(applicant.name)}</td>
@@ -115,6 +118,16 @@ function renderTable(applicants) {
       </tr>`;
     })
     .join('');
+}
+
+function cleanDisplayPosition(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  return text
+    .replace(/\s*sent from the baltimore city sheriff[’']?s office.*$/i, '')
+    .trim()
+    .replace(/[,\-;]+$/, '')
+    .trim();
 }
 
 function shortenPosition(value) {

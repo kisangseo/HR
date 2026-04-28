@@ -444,7 +444,7 @@ if __name__ == "__main__":
     main()
     def strip_sent_from_suffix(value: str) -> str:
         return re.sub(
-            r"(?is)\s*sent from the baltimore city sheriff'?s office.*$",
+            r"(?is)\s*sent from the baltimore city sheriff[’']?s office.*$",
             "",
             (value or "").strip(),
         ).strip(" ,;-")
