@@ -34,6 +34,7 @@ This version runs ingest/query directly against SQL Server so the web app and yo
 ## Run
 
 ```bash
+python3 -m pip install -r requirements.txt
 export HR_SQL_CONNECTION_STRING="Driver={ODBC Driver 18 for SQL Server};Server=tcp:YOUR_SERVER.database.windows.net,1433;Database=YOUR_DB;Uid=YOUR_USER;Pwd=YOUR_PASSWORD;Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;"
 # optional email auto-ingest
 export HR_EMAIL_POLL_ENABLED=true
