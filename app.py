@@ -332,6 +332,8 @@ def build_record_from_make(payload: dict[str, Any]) -> dict[str, Any] | None:
         "raw_payload": payload,
     }
 
+# Legacy CSV ingest helper retained for possible future re-enable.
+# API routes for /api/ingest-csv are currently disabled.
 def ingest_csv(csv_text: str) -> dict[str, Any]:
     clean_text = csv_text.replace("\x00", "")
     sample = clean_text[:4096]
@@ -553,6 +555,20 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
     return output
 
 
+def query_job_titles() -> list[str]:
+    sql = """
+        SELECT DISTINCT primary_position
+        FROM job_applications
+        WHERE primary_position IS NOT NULL
+          AND LTRIM(RTRIM(primary_position)) <> ''
+        ORDER BY primary_position ASC
+    """
+    with get_sql_connection() as conn:
+        cursor = conn.cursor()
+        rows = cursor.execute(sql).fetchall()
+    return [str(row[0]).strip() for row in rows if str(row[0]).strip()]
+
+
 def _http_status(code: int) -> str:
     phrases = {
         200: "OK",
@@ -626,6 +642,12 @@ def app(environ, start_response):
                 return _wsgi_json(start_response, {"applicants": data})
             except Exception as exc:
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
+        if path == "/api/job-titles":
+            try:
+                titles = query_job_titles()
+                return _wsgi_json(start_response, {"job_titles": titles})
+            except Exception as exc:
+                return _wsgi_json(start_response, {"error": str(exc)}, 500)
         return _wsgi_json(start_response, {"error": "Not Found"}, 404)
 
     if method == "POST":
@@ -653,13 +675,16 @@ def app(environ, start_response):
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
 
         if path == "/api/ingest-csv":
-            if not body_text.strip():
-                return _wsgi_json(start_response, {"error": "CSV payload is empty."}, 400)
-            try:
-                result = ingest_csv(body_text)
-                return _wsgi_json(start_response, result)
-            except Exception as exc:
-                return _wsgi_json(start_response, {"error": str(exc)}, 500)
+            # CSV ingest is intentionally disabled for now to avoid manual user uploads.
+            # Legacy handler kept commented for quick restore:
+            # if not body_text.strip():
+            #     return _wsgi_json(start_response, {"error": "CSV payload is empty."}, 400)
+            # try:
+            #     result = ingest_csv(body_text)
+            #     return _wsgi_json(start_response, result)
+            # except Exception as exc:
+            #     return _wsgi_json(start_response, {"error": str(exc)}, 500)
+            return _wsgi_json(start_response, {"error": "CSV ingest is disabled."}, 410)
 
         return _wsgi_json(start_response, {"error": "Not Found"}, 404)
 
@@ -716,6 +741,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(exc)}, 500)
             return
 
+        if parsed.path == "/api/job-titles":
+            try:
+                self._send_json({"job_titles": query_job_titles()})
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, 500)
+            return
+
         if parsed.path == "/api/version":
             self._send_json({"app_version": APP_VERSION, "db_backend": "sqlserver"})
             return
@@ -758,18 +790,21 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
 
-        content_length = int(self.headers.get("Content-Length", "0"))
-        body = self.rfile.read(content_length).decode("utf-8")
-
-        if not body.strip():
-            self._send_json({"error": "CSV payload is empty."}, 400)
-            return
-
-        try:
-            result = ingest_csv(body)
-            self._send_json(result)
-        except Exception as exc:
-            self._send_json({"error": str(exc)}, 500)
+        # CSV ingest is intentionally disabled for now to avoid manual user uploads.
+        # Legacy handler kept commented for quick restore:
+        # content_length = int(self.headers.get("Content-Length", "0"))
+        # body = self.rfile.read(content_length).decode("utf-8")
+        #
+        # if not body.strip():
+        #     self._send_json({"error": "CSV payload is empty."}, 400)
+        #     return
+        #
+        # try:
+        #     result = ingest_csv(body)
+        #     self._send_json(result)
+        # except Exception as exc:
+        #     self._send_json({"error": str(exc)}, 500)
+        self._send_json({"error": "CSV ingest is disabled."}, 410)
 
 
 def run() -> None:
