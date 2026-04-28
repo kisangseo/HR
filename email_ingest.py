@@ -271,11 +271,7 @@ def is_target_job_application(message: dict[str, Any]) -> bool:
     return sender_matches and SUBJECT_CONTAINS in subject
 
 
-def main() -> None:
-    cli = argparse.ArgumentParser(description="Ingest Baltimore Sheriff job-application emails into SQL Server.")
-    cli.add_argument("--scan-limit", type=int, default=INBOX_SCAN_LIMIT, help="Maximum inbox emails to inspect")
-    args = cli.parse_args()
-
+def run_ingest(scan_limit: int) -> dict[str, int]:
     if not MAILBOX_EMAIL:
         raise RuntimeError("MAILBOX_EMAIL is not set")
 
@@ -288,10 +284,10 @@ def main() -> None:
         TARGET_SENDER,
         SENDER_MATCH_MODE,
         SUBJECT_CONTAINS,
-        max(args.scan_limit, 1),
+        max(scan_limit, 1),
     )
 
-    messages = fetch_inbox_messages(token, MAILBOX_EMAIL, max(args.scan_limit, 1))
+    messages = fetch_inbox_messages(token, MAILBOX_EMAIL, max(scan_limit, 1))
     logging.info("Fetched %d inbox messages", len(messages))
 
     if messages:
@@ -336,6 +332,14 @@ def main() -> None:
         inserted,
         moved,
     )
+    return {"scanned": len(messages), "matched": matched, "inserted": inserted, "moved": moved}
+
+
+def main() -> None:
+    cli = argparse.ArgumentParser(description="Ingest Baltimore Sheriff job-application emails into SQL Server.")
+    cli.add_argument("--scan-limit", type=int, default=INBOX_SCAN_LIMIT, help="Maximum inbox emails to inspect")
+    args = cli.parse_args()
+    run_ingest(max(args.scan_limit, 1))
 
 
 if __name__ == "__main__":

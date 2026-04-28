@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parent
 APP_VERSION = "2026-04-27.ingest-diagnostics-v3"
 SQL_CONNECTION_STRING = os.getenv("HR_SQL_CONNECTION_STRING", "").strip()
 MAKE_WEBHOOK_TOKEN = os.getenv("HR_MAKE_WEBHOOK_TOKEN", "").strip()
+RUN_INGEST_TOKEN = os.getenv("HR_RUN_INGEST_TOKEN", "").strip()
 SERVER_HOST = os.getenv("HR_HOST", "127.0.0.1").strip() or "127.0.0.1"
 SERVER_PORT = int(os.getenv("PORT") or os.getenv("HR_PORT") or "8000")
 
@@ -569,6 +570,12 @@ def query_job_titles() -> list[str]:
     return [str(row[0]).strip() for row in rows if str(row[0]).strip()]
 
 
+def run_email_ingest(scan_limit: int) -> dict[str, Any]:
+    from email_ingest import run_ingest
+
+    return run_ingest(scan_limit=max(scan_limit, 1))
+
+
 def _http_status(code: int) -> str:
     phrases = {
         200: "OK",
@@ -630,6 +637,19 @@ def app(environ, start_response):
             return _wsgi_file(start_response, STATIC_CSS, "text/css; charset=utf-8")
         if path == "/api/version":
             return _wsgi_json(start_response, {"app_version": APP_VERSION, "db_backend": "sqlserver"})
+        if path == "/run-ingest":
+            provided_token = environ.get("HTTP_X_RUN_TOKEN", "") or (query.get("token") or [""])[0]
+            if RUN_INGEST_TOKEN and provided_token != RUN_INGEST_TOKEN:
+                return _wsgi_json(start_response, {"error": "Unauthorized run token."}, 401)
+            try:
+                scan_limit = int((query.get("scan_limit") or ["500"])[0] or "500")
+            except ValueError:
+                scan_limit = 500
+            try:
+                result = run_email_ingest(scan_limit=scan_limit)
+                return _wsgi_json(start_response, {"ok": True, **result})
+            except Exception as exc:
+                return _wsgi_json(start_response, {"error": str(exc)}, 500)
         if path == "/api/applicants":
             filters = {
                 "name": (query.get("name") or [""])[0],
@@ -761,6 +781,23 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/version":
             self._send_json({"app_version": APP_VERSION, "db_backend": "sqlserver"})
+            return
+
+        if parsed.path == "/run-ingest":
+            query = parse_qs(parsed.query)
+            provided_token = self.headers.get("X-Run-Token", "") or (query.get("token") or [""])[0]
+            if RUN_INGEST_TOKEN and provided_token != RUN_INGEST_TOKEN:
+                self._send_json({"error": "Unauthorized run token."}, 401)
+                return
+            try:
+                scan_limit = int((query.get("scan_limit") or ["500"])[0] or "500")
+            except ValueError:
+                scan_limit = 500
+            try:
+                result = run_email_ingest(scan_limit=scan_limit)
+                self._send_json({"ok": True, **result})
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, 500)
             return
 
         self.send_error(404)

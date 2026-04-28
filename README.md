@@ -79,30 +79,28 @@ Troubleshooting:
 - Azure App Service environment variables are only used by code running inside App Service (not your local terminal run).
 - Startup logs now print mailbox/sender config and top senders scanned so you can verify filtering.
 
-## Run email ingest from GitHub Actions
+## Run email ingest from GitHub Actions (simple endpoint trigger)
 
-This repo includes `.github/workflows/email_ingest_job.yml` to run `email_ingest.py` on a schedule (every 30 minutes) or manually.
+This repo includes `.github/workflows/email_ingest_job.yml` that just calls a hosted endpoint every 5 minutes (or manually), similar to:
 
-Set these repository secrets before enabling the workflow:
-- `HR_CLIENT_ID`
-- `HR_CLIENT_SECRET`
-- `HR_TENANT_ID`
-- `HR_SQL_CONNECTION_STRING`
-- `HR_MAILBOX_EMAIL`
-- `HR_JOB_APP_SENDER` (example: `noreply@baltimorecitysheriff.gov`)
-- `HR_JOB_APP_SENDER_MATCH_MODE` (`exact` or `contains`)
-- `HR_JOB_APP_SUBJECT_CONTAINS` (example: `Job Application`)
-- `HR_JOB_APP_INGEST_SOURCE` (example: `email` or `csv`)
+```yaml
+run: curl https://YOUR_APP/run-ingest
+```
 
-Important:
-- Yes, you must set mailbox/auth values in **GitHub Secrets** for the GitHub workflow.
-- Azure App Service environment variables are separate and are not automatically injected into GitHub Actions runs.
-- Workflow now supports either **Secrets** or **Variables** (`vars`) for these names; secrets are still recommended.
-- If logs still show old behavior, make sure the latest workflow commit is on the branch you are running in Actions.
+Required GitHub secret/variable:
+- `HR_INGEST_ENDPOINT_URL` (example: `https://<your-app>.azurewebsites.net/run-ingest`)
+
+Optional (recommended):
+- `HR_RUN_INGEST_TOKEN` (passed as `X-Run-Token` header)
 
 Then run:
-1. GitHub → **Actions** → **Email ingest job (Microsoft Graph -> SQL)**.
-2. Click **Run workflow** (optional `scan_limit` override).
+1. GitHub → **Actions** → **Email ingest trigger**.
+2. Click **Run workflow**.
+
+### Endpoint security
+
+Set `HR_RUN_INGEST_TOKEN` in your app settings to require auth for `/run-ingest`.
+If set, callers must send the same value as `X-Run-Token` (or `?token=` query param).
 
 ### Azure App Service note
 
