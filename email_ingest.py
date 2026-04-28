@@ -147,8 +147,8 @@ def extract_sender_address(message: dict[str, Any]) -> str:
 def strip_html_to_text(body_html: str) -> str:
     body_html = body_html or ""
     body_html = re.sub(r"<br\\s*/?>", "\n", body_html, flags=re.IGNORECASE)
-    body_html = re.sub(r"</p\\s*>", "\n", body_html, flags=re.IGNORECASE)
-    body_html = re.sub(r"</div\\s*>", "\n", body_html, flags=re.IGNORECASE)
+    body_html = re.sub(r"</(p|div|tr|td|th|table|li|h1|h2|h3|h4|h5|h6)\\s*>", "\n", body_html, flags=re.IGNORECASE)
+    body_html = re.sub(r"<(p|div|tr|td|th|table|li|h1|h2|h3|h4|h5|h6)[^>]*>", "\n", body_html, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", "", body_html)
     text = html.unescape(text)
     text = text.replace("\xa0", " ")
@@ -184,11 +184,44 @@ def parse_job_application_email(body_html: str) -> ParsedApplication:
         if current_key:
             collected[current_key].append(line)
 
+    ordered_labels = [
+        "name",
+        "email",
+        "phone number",
+        "primary position you are applying for",
+        "other interested positions",
+        "sent from",
+    ]
+
+    def capture_between(label: str, preserve_newlines: bool = False) -> str:
+        label_index = ordered_labels.index(label)
+        next_labels = ordered_labels[label_index + 1 :]
+        next_pattern = "|".join(re.escape(value) for value in next_labels)
+        pattern = rf"(?is)\b{re.escape(label)}\b[\s:.-]*(.*?)(?=\b(?:{next_pattern})\b|$)"
+        match = re.search(pattern, text)
+        if not match:
+            return ""
+        value = match.group(1).strip()
+        if preserve_newlines:
+            return "\n".join(part.strip() for part in value.splitlines() if part.strip()).strip()
+        return re.sub(r"\s+", " ", value).strip()
+
     name = " ".join(collected["name"]).strip()
     email_value = " ".join(collected["email"]).strip()
     phone = " ".join(collected["phone"]).strip()
     primary_position = " ".join(collected["primary_position"]).strip()
     other_raw = "\n".join(collected["other_positions"]).strip()
+
+    if not name:
+        name = capture_between("name")
+    if not email_value:
+        email_value = capture_between("email")
+    if not phone:
+        phone = capture_between("phone number")
+    if not primary_position:
+        primary_position = capture_between("primary position you are applying for")
+    if not other_raw:
+        other_raw = capture_between("other interested positions", preserve_newlines=True)
 
     other_parts = [
         part.strip()
