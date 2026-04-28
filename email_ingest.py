@@ -22,6 +22,7 @@ TARGET_SENDER = (os.getenv("JOB_APP_SENDER", "noreply@baltimorecitysheriff.gov")
 SUBJECT_CONTAINS = (os.getenv("JOB_APP_SUBJECT_CONTAINS", "Job Application") or "").strip().lower()
 INBOX_SCAN_LIMIT = int(os.getenv("INBOX_SCAN_LIMIT", "500"))
 SQL_CONNECTION_STRING = (os.getenv("HR_SQL_CONNECTION_STRING") or "").strip()
+INGEST_SOURCE = (os.getenv("JOB_APP_INGEST_SOURCE", "csv") or "csv").strip()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -253,7 +254,7 @@ def insert_application(cursor: pyodbc.Cursor, parsed: ParsedApplication, message
             (parsed.get("primary_position") or "").strip(),
             json.dumps(parsed.get("other_positions") or []),
             "interest_submitted",
-            "email_graph",
+            INGEST_SOURCE,
             json.dumps(raw_payload),
         ),
     )
