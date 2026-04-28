@@ -249,7 +249,7 @@ def map_row(raw_row: dict[str, str]) -> tuple[dict[str, Any] | None, list[str]]:
 def insert_mapped_record(cursor, mapped: dict[str, Any]) -> None:
     cursor.execute(
         """
-        INSERT INTO job_applications (
+        INSERT INTO dbo.job_applications (
             submitted_at, first_name, last_name, email, phone,
             primary_position, other_positions, status, source, raw_payload
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -469,7 +469,7 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
         SELECT
             id, submitted_at, full_name, email, phone,
             primary_position, other_positions, status, source
-        FROM job_applications
+        FROM dbo.job_applications
         WHERE 1 = 1
     """
 
@@ -559,7 +559,7 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
 def query_job_titles() -> list[str]:
     sql = """
         SELECT DISTINCT primary_position
-        FROM job_applications
+        FROM dbo.job_applications
         WHERE primary_position IS NOT NULL
           AND LTRIM(RTRIM(primary_position)) <> ''
         ORDER BY primary_position ASC

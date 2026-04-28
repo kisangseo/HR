@@ -256,7 +256,7 @@ def insert_application(cursor: pyodbc.Cursor, parsed: ParsedApplication, message
 
     cursor.execute(
         """
-        INSERT INTO job_applications (
+        INSERT INTO dbo.job_applications (
             submitted_at, first_name, last_name, email, phone,
             primary_position, other_positions, status, source, raw_payload
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
