@@ -1,0 +1,24 @@
+name: Email ingest trigger
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  call-endpoint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call ingest endpoint
+        env:
+          RUN_TOKEN: ${{ secrets.HR_RUN_INGEST_TOKEN || vars.HR_RUN_INGEST_TOKEN }}
+        run: |
+          INGEST_ENDPOINT_URL="https://jobapplications-badhh8h5afdpcqe8.centralus-01.azurewebsites.net/run-ingest"
+
+          if [ -n "${RUN_TOKEN}" ]; then
+            curl --fail --show-error --silent \
+              -H "X-Run-Token: ${RUN_TOKEN}" \
+              "${INGEST_ENDPOINT_URL}"
+          else
+            curl --fail --show-error --silent "${INGEST_ENDPOINT_URL}"
+          fi

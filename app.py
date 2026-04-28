@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parent
 APP_VERSION = "2026-04-27.ingest-diagnostics-v3"
 SQL_CONNECTION_STRING = os.getenv("HR_SQL_CONNECTION_STRING", "").strip()
 MAKE_WEBHOOK_TOKEN = os.getenv("HR_MAKE_WEBHOOK_TOKEN", "").strip()
+RUN_INGEST_TOKEN = os.getenv("HR_RUN_INGEST_TOKEN", "").strip()
 SERVER_HOST = os.getenv("HR_HOST", "127.0.0.1").strip() or "127.0.0.1"
 SERVER_PORT = int(os.getenv("PORT") or os.getenv("HR_PORT") or "8000")
 
@@ -332,6 +333,8 @@ def build_record_from_make(payload: dict[str, Any]) -> dict[str, Any] | None:
         "raw_payload": payload,
     }
 
+# Legacy CSV ingest helper retained for possible future re-enable.
+# API routes for /api/ingest-csv are currently disabled.
 def ingest_csv(csv_text: str) -> dict[str, Any]:
     clean_text = csv_text.replace("\x00", "")
     sample = clean_text[:4096]
@@ -553,6 +556,26 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
     return output
 
 
+def query_job_titles() -> list[str]:
+    sql = """
+        SELECT DISTINCT primary_position
+        FROM job_applications
+        WHERE primary_position IS NOT NULL
+          AND LTRIM(RTRIM(primary_position)) <> ''
+        ORDER BY primary_position ASC
+    """
+    with get_sql_connection() as conn:
+        cursor = conn.cursor()
+        rows = cursor.execute(sql).fetchall()
+    return [str(row[0]).strip() for row in rows if str(row[0]).strip()]
+
+
+def run_email_ingest(scan_limit: int, source_folder: str = "inbox") -> dict[str, Any]:
+    from email_ingest import run_ingest
+
+    return run_ingest(scan_limit=max(scan_limit, 1), source_folder=source_folder)
+
+
 def _http_status(code: int) -> str:
     phrases = {
         200: "OK",
@@ -614,6 +637,22 @@ def app(environ, start_response):
             return _wsgi_file(start_response, STATIC_CSS, "text/css; charset=utf-8")
         if path == "/api/version":
             return _wsgi_json(start_response, {"app_version": APP_VERSION, "db_backend": "sqlserver"})
+        if path == "/run-ingest":
+            provided_token = environ.get("HTTP_X_RUN_TOKEN", "") or (query.get("token") or [""])[0]
+            if RUN_INGEST_TOKEN and provided_token != RUN_INGEST_TOKEN:
+                return _wsgi_json(start_response, {"error": "Unauthorized run token."}, 401)
+            try:
+                scan_limit = int((query.get("scan_limit") or ["500"])[0] or "500")
+            except ValueError:
+                scan_limit = 500
+            source_folder = ((query.get("source_folder") or ["inbox"])[0] or "inbox").strip().lower()
+            if source_folder not in {"inbox", "processed"}:
+                source_folder = "inbox"
+            try:
+                result = run_email_ingest(scan_limit=scan_limit, source_folder=source_folder)
+                return _wsgi_json(start_response, {"ok": True, **result})
+            except Exception as exc:
+                return _wsgi_json(start_response, {"error": str(exc)}, 500)
         if path == "/api/applicants":
             filters = {
                 "name": (query.get("name") or [""])[0],
@@ -624,6 +663,12 @@ def app(environ, start_response):
             try:
                 data = query_applicants(filters)
                 return _wsgi_json(start_response, {"applicants": data})
+            except Exception as exc:
+                return _wsgi_json(start_response, {"error": str(exc)}, 500)
+        if path == "/api/job-titles":
+            try:
+                titles = query_job_titles()
+                return _wsgi_json(start_response, {"job_titles": titles})
             except Exception as exc:
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
         return _wsgi_json(start_response, {"error": "Not Found"}, 404)
@@ -653,13 +698,16 @@ def app(environ, start_response):
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
 
         if path == "/api/ingest-csv":
-            if not body_text.strip():
-                return _wsgi_json(start_response, {"error": "CSV payload is empty."}, 400)
-            try:
-                result = ingest_csv(body_text)
-                return _wsgi_json(start_response, result)
-            except Exception as exc:
-                return _wsgi_json(start_response, {"error": str(exc)}, 500)
+            # CSV ingest is intentionally disabled for now to avoid manual user uploads.
+            # Legacy handler kept commented for quick restore:
+            # if not body_text.strip():
+            #     return _wsgi_json(start_response, {"error": "CSV payload is empty."}, 400)
+            # try:
+            #     result = ingest_csv(body_text)
+            #     return _wsgi_json(start_response, result)
+            # except Exception as exc:
+            #     return _wsgi_json(start_response, {"error": str(exc)}, 500)
+            return _wsgi_json(start_response, {"error": "CSV ingest is disabled."}, 410)
 
         return _wsgi_json(start_response, {"error": "Not Found"}, 404)
 
@@ -716,8 +764,35 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(exc)}, 500)
             return
 
+        if parsed.path == "/api/job-titles":
+            try:
+                self._send_json({"job_titles": query_job_titles()})
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, 500)
+            return
+
         if parsed.path == "/api/version":
             self._send_json({"app_version": APP_VERSION, "db_backend": "sqlserver"})
+            return
+
+        if parsed.path == "/run-ingest":
+            query = parse_qs(parsed.query)
+            provided_token = self.headers.get("X-Run-Token", "") or (query.get("token") or [""])[0]
+            if RUN_INGEST_TOKEN and provided_token != RUN_INGEST_TOKEN:
+                self._send_json({"error": "Unauthorized run token."}, 401)
+                return
+            try:
+                scan_limit = int((query.get("scan_limit") or ["500"])[0] or "500")
+            except ValueError:
+                scan_limit = 500
+            source_folder = ((query.get("source_folder") or ["inbox"])[0] or "inbox").strip().lower()
+            if source_folder not in {"inbox", "processed"}:
+                source_folder = "inbox"
+            try:
+                result = run_email_ingest(scan_limit=scan_limit, source_folder=source_folder)
+                self._send_json({"ok": True, **result})
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, 500)
             return
 
         self.send_error(404)
@@ -758,18 +833,21 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
 
-        content_length = int(self.headers.get("Content-Length", "0"))
-        body = self.rfile.read(content_length).decode("utf-8")
-
-        if not body.strip():
-            self._send_json({"error": "CSV payload is empty."}, 400)
-            return
-
-        try:
-            result = ingest_csv(body)
-            self._send_json(result)
-        except Exception as exc:
-            self._send_json({"error": str(exc)}, 500)
+        # CSV ingest is intentionally disabled for now to avoid manual user uploads.
+        # Legacy handler kept commented for quick restore:
+        # content_length = int(self.headers.get("Content-Length", "0"))
+        # body = self.rfile.read(content_length).decode("utf-8")
+        #
+        # if not body.strip():
+        #     self._send_json({"error": "CSV payload is empty."}, 400)
+        #     return
+        #
+        # try:
+        #     result = ingest_csv(body)
+        #     self._send_json(result)
+        # except Exception as exc:
+        #     self._send_json({"error": str(exc)}, 500)
+        self._send_json({"error": "CSV ingest is disabled."}, 410)
 
 
 def run() -> None:
