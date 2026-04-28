@@ -2,21 +2,12 @@ from __future__ import annotations
 
 import csv
 import io
-import imaplib
 import json
 import os
-import re
-import threading
-import time
 from collections import Counter
 from datetime import datetime, timezone
-from email import message_from_bytes
-from email.message import Message
-from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlencode
-from urllib.request import Request, urlopen
 from urllib.parse import parse_qs, urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 try:
@@ -27,21 +18,9 @@ except ImportError:  # pragma: no cover
 ROOT = Path(__file__).resolve().parent
 APP_VERSION = "2026-04-27.ingest-diagnostics-v3"
 SQL_CONNECTION_STRING = os.getenv("HR_SQL_CONNECTION_STRING", "").strip()
-EMAIL_POLL_ENABLED = os.getenv("HR_EMAIL_POLL_ENABLED", "false").lower() == "true"
-EMAIL_IMAP_HOST = os.getenv("HR_IMAP_HOST", "outlook.office365.com")
-EMAIL_IMAP_PORT = int(os.getenv("HR_IMAP_PORT", "993"))
-EMAIL_IMAP_USER = os.getenv("HR_IMAP_USER", "noreply@baltimorecitysheriff.gov")
-EMAIL_IMAP_PASSWORD = os.getenv("HR_IMAP_PASSWORD", "")
-EMAIL_IMAP_MAILBOX = os.getenv("HR_IMAP_MAILBOX", "INBOX")
-EMAIL_IMAP_PROCESSED_MAILBOX = os.getenv("HR_IMAP_PROCESSED_MAILBOX", "Processed")
-EMAIL_SUBJECT_KEYWORD = os.getenv("HR_EMAIL_SUBJECT_KEYWORD", "Job Application Form")
-EMAIL_POLL_SECONDS = int(os.getenv("HR_EMAIL_POLL_SECONDS", "60"))
-GRAPH_TENANT_ID = os.getenv("HR_GRAPH_TENANT_ID", "").strip()
-GRAPH_CLIENT_ID = os.getenv("HR_GRAPH_CLIENT_ID", "").strip()
-GRAPH_CLIENT_SECRET = os.getenv("HR_GRAPH_CLIENT_SECRET", "").strip()
-GRAPH_MAILBOX = os.getenv("HR_GRAPH_MAILBOX", "noreply@baltimorecitysheriff.gov").strip()
-GRAPH_PROCESSED_FOLDER = os.getenv("HR_GRAPH_PROCESSED_FOLDER", "Processed").strip()
 MAKE_WEBHOOK_TOKEN = os.getenv("HR_MAKE_WEBHOOK_TOKEN", "").strip()
+SERVER_HOST = os.getenv("HR_HOST", "127.0.0.1").strip() or "127.0.0.1"
+SERVER_PORT = int(os.getenv("PORT") or os.getenv("HR_PORT") or "8000")
 
 INDEX_HTML = ROOT / "index.html"
 STATIC_JS = ROOT / "app.js"
@@ -263,90 +242,6 @@ def map_row(raw_row: dict[str, str]) -> tuple[dict[str, Any] | None, list[str]]:
         "source": "csv",
         "raw_payload": raw_row,
     }, errors
-
-
-def extract_email_fields(email_text: str) -> dict[str, str]:
-    lines = [line.strip() for line in email_text.splitlines()]
-    lines = [line for line in lines if line]
-    labels = {
-        "name": "Name",
-        "email": "Email",
-        "phone": "Phone Number",
-        "primary": "Primary Position You Are Applying For",
-        "other": "Other Interested Positions",
-    }
-    output: dict[str, str] = {}
-    for idx, line in enumerate(lines):
-        for key, label in labels.items():
-            if line.lower() == label.lower():
-                # take next non-empty line as value
-                for next_idx in range(idx + 1, len(lines)):
-                    candidate = lines[next_idx].strip()
-                    if candidate and candidate.lower() not in {v.lower() for v in labels.values()}:
-                        output[key] = candidate
-                        break
-    return output
-
-
-def get_message_body(msg: Message) -> str:
-    if msg.is_multipart():
-        plain_part = None
-        html_part = None
-        for part in msg.walk():
-            content_type = part.get_content_type()
-            if part.get_content_maintype() == "multipart":
-                continue
-            payload = part.get_payload(decode=True) or b""
-            charset = part.get_content_charset() or "utf-8"
-            try:
-                text = payload.decode(charset, errors="replace")
-            except LookupError:
-                text = payload.decode("utf-8", errors="replace")
-            if content_type == "text/plain" and not plain_part:
-                plain_part = text
-            elif content_type == "text/html" and not html_part:
-                html_part = text
-        body = plain_part or html_part or ""
-    else:
-        payload = msg.get_payload(decode=True) or b""
-        charset = msg.get_content_charset() or "utf-8"
-        try:
-            body = payload.decode(charset, errors="replace")
-        except LookupError:
-            body = payload.decode("utf-8", errors="replace")
-
-    if "<" in body and ">" in body:
-        body = re.sub(r"<br\\s*/?>", "\n", body, flags=re.IGNORECASE)
-        body = re.sub(r"</p\\s*>", "\n", body, flags=re.IGNORECASE)
-        body = re.sub(r"<[^>]+>", " ", body)
-    return body
-
-
-def build_record_from_email(fields: dict[str, str], submitted_at: str, raw_payload: dict[str, Any]) -> dict[str, Any] | None:
-    full_name = fields.get("name", "").strip()
-    if not full_name:
-        return None
-
-    name_parts = full_name.split(maxsplit=1)
-    first_name = name_parts[0]
-    last_name = name_parts[1] if len(name_parts) > 1 else ""
-    primary = fields.get("primary", "").strip()
-    other_values = split_multi_value(fields.get("other", ""))
-    other_values = [value for value in other_values if value.lower() != primary.lower()]
-
-    return {
-        "submitted_at": submitted_at,
-        "first_name": first_name,
-        "last_name": last_name,
-        "full_name": full_name,
-        "email": fields.get("email", "").strip(),
-        "phone": normalize_phone(fields.get("phone", "")),
-        "primary_position": primary,
-        "other_positions": other_values,
-        "status": "interest_submitted",
-        "source": "email_interest_form",
-        "raw_payload": raw_payload,
-    }
 
 
 def insert_mapped_record(cursor, mapped: dict[str, Any]) -> None:
@@ -657,223 +552,6 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
     return output
 
 
-def poll_interest_form_emails_forever() -> None:
-    if not EMAIL_IMAP_PASSWORD:
-        print("Email poller disabled: HR_IMAP_PASSWORD is not set.")
-        return
-
-    print(f"Email poller started for mailbox {EMAIL_IMAP_USER} ({EMAIL_IMAP_MAILBOX}).")
-    while True:
-        try:
-            with imaplib.IMAP4_SSL(EMAIL_IMAP_HOST, EMAIL_IMAP_PORT) as client:
-                client.login(EMAIL_IMAP_USER, EMAIL_IMAP_PASSWORD)
-                client.select(EMAIL_IMAP_MAILBOX)
-                status, data = client.search(None, f'(UNSEEN SUBJECT "{EMAIL_SUBJECT_KEYWORD}")')
-                if status != "OK":
-                    time.sleep(EMAIL_POLL_SECONDS)
-                    continue
-
-                message_ids = data[0].split()
-                if not message_ids:
-                    time.sleep(EMAIL_POLL_SECONDS)
-                    continue
-
-                with get_sql_connection() as conn:
-                    cursor = conn.cursor()
-                    for message_id in message_ids:
-                        fetch_status, payload = client.fetch(message_id, "(RFC822)")
-                        if fetch_status != "OK" or not payload or not payload[0]:
-                            continue
-                        msg = message_from_bytes(payload[0][1])
-                        body = get_message_body(msg)
-                        fields = extract_email_fields(body)
-                        if not fields:
-                            client.store(message_id, "+FLAGS", "(\\Seen)")
-                            continue
-
-                        date_header = msg.get("Date", "")
-                        parsed_date = None
-                        if date_header:
-                            try:
-                                parsed_date = parsedate_to_datetime(date_header)
-                            except Exception:
-                                parsed_date = None
-                        submitted_at = (
-                            parsed_date.date().isoformat()
-                            if parsed_date else datetime.now(timezone.utc).date().isoformat()
-                        )
-
-                        mapped = build_record_from_email(
-                            fields,
-                            submitted_at=submitted_at,
-                            raw_payload={"subject": msg.get("Subject", ""), "fields": fields},
-                        )
-                        if not mapped or contains_test_name(mapped["full_name"]):
-                            client.store(message_id, "+FLAGS", "(\\Seen)")
-                            if EMAIL_IMAP_PROCESSED_MAILBOX:
-                                client.copy(message_id, EMAIL_IMAP_PROCESSED_MAILBOX)
-                                client.store(message_id, "+FLAGS", "(\\Deleted)")
-                            continue
-
-                        insert_mapped_record(cursor, mapped)
-                        client.store(message_id, "+FLAGS", "(\\Seen)")
-                        if EMAIL_IMAP_PROCESSED_MAILBOX:
-                            client.copy(message_id, EMAIL_IMAP_PROCESSED_MAILBOX)
-                            client.store(message_id, "+FLAGS", "(\\Deleted)")
-                    if EMAIL_IMAP_PROCESSED_MAILBOX:
-                        client.expunge()
-                    conn.commit()
-
-        except Exception as exc:
-            print(f"Email poller error: {exc}")
-        time.sleep(EMAIL_POLL_SECONDS)
-
-
-def graph_request(
-    method: str,
-    url: str,
-    access_token: str,
-    payload: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    body = None
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Accept": "application/json",
-    }
-    if payload is not None:
-        body = json.dumps(payload).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-    request = Request(url, data=body, headers=headers, method=method)
-    with urlopen(request, timeout=30) as response:
-        text = response.read().decode("utf-8")
-        return json.loads(text) if text else {}
-
-
-def graph_get_access_token() -> str:
-    if not GRAPH_TENANT_ID or not GRAPH_CLIENT_ID or not GRAPH_CLIENT_SECRET:
-        raise RuntimeError("Graph poller not configured: HR_GRAPH_TENANT_ID/CLIENT_ID/CLIENT_SECRET are required.")
-
-    token_url = f"https://login.microsoftonline.com/{quote(GRAPH_TENANT_ID)}/oauth2/v2.0/token"
-    form = (
-        "client_id=" + quote(GRAPH_CLIENT_ID)
-        + "&client_secret=" + quote(GRAPH_CLIENT_SECRET)
-        + "&scope=" + quote("https://graph.microsoft.com/.default")
-        + "&grant_type=client_credentials"
-    ).encode("utf-8")
-    request = Request(
-        token_url,
-        data=form,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
-    with urlopen(request, timeout=30) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-    token = payload.get("access_token")
-    if not token:
-        raise RuntimeError(f"Could not fetch Graph access token: {payload}")
-    return token
-
-
-def graph_get_or_create_folder_id(access_token: str, mailbox: str, folder_name: str) -> str:
-    mailbox_q = quote(mailbox)
-    folder_q = folder_name.replace("'", "''")
-    query = urlencode({
-        "$filter": f"displayName eq '{folder_q}'",
-        "$select": "id,displayName",
-    })
-    list_url = f"https://graph.microsoft.com/v1.0/users/{mailbox_q}/mailFolders?{query}"
-    listed = graph_request("GET", list_url, access_token)
-    values = listed.get("value", [])
-    if values:
-        return values[0]["id"]
-
-    created = graph_request(
-        "POST",
-        f"https://graph.microsoft.com/v1.0/users/{mailbox_q}/mailFolders",
-        access_token,
-        payload={"displayName": folder_name},
-    )
-    folder_id = created.get("id")
-    if not folder_id:
-        raise RuntimeError(f"Unable to create/find folder {folder_name}")
-    return folder_id
-
-
-def poll_interest_form_graph_forever() -> None:
-    print(f"Graph email poller started for mailbox {GRAPH_MAILBOX} (subject: {EMAIL_SUBJECT_KEYWORD}).")
-    processed_folder_id = ""
-    while True:
-        try:
-            access_token = graph_get_access_token()
-            if not processed_folder_id and GRAPH_PROCESSED_FOLDER:
-                processed_folder_id = graph_get_or_create_folder_id(access_token, GRAPH_MAILBOX, GRAPH_PROCESSED_FOLDER)
-
-            mailbox_q = quote(GRAPH_MAILBOX)
-            subject_q = EMAIL_SUBJECT_KEYWORD.replace("'", "''")
-            query = urlencode({
-                "$select": "id,subject,receivedDateTime,body,isRead",
-                "$top": "50",
-                "$filter": f"isRead eq false and contains(subject,'{subject_q}')",
-                "$orderby": "receivedDateTime asc",
-            })
-            messages_url = f"https://graph.microsoft.com/v1.0/users/{mailbox_q}/mailFolders/inbox/messages?{query}"
-            result = graph_request("GET", messages_url, access_token)
-            messages = result.get("value", [])
-            if not messages:
-                time.sleep(EMAIL_POLL_SECONDS)
-                continue
-
-            with get_sql_connection() as conn:
-                cursor = conn.cursor()
-                for msg in messages:
-                    message_id = msg.get("id")
-                    body = (msg.get("body") or {}).get("content", "")
-                    fields = extract_email_fields(body)
-                    if not fields:
-                        graph_request(
-                            "PATCH",
-                            f"https://graph.microsoft.com/v1.0/users/{mailbox_q}/messages/{quote(message_id)}",
-                            access_token,
-                            payload={"isRead": True},
-                        )
-                        continue
-
-                    received = msg.get("receivedDateTime", "")
-                    submitted_at = datetime.now(timezone.utc).date().isoformat()
-                    if received:
-                        try:
-                            submitted_at = datetime.fromisoformat(received.replace("Z", "+00:00")).date().isoformat()
-                        except ValueError:
-                            submitted_at = datetime.now(timezone.utc).date().isoformat()
-
-                    mapped = build_record_from_email(
-                        fields,
-                        submitted_at=submitted_at,
-                        raw_payload={"subject": msg.get("subject", ""), "fields": fields},
-                    )
-                    if mapped and not contains_test_name(mapped["full_name"]):
-                        insert_mapped_record(cursor, mapped)
-
-                    if processed_folder_id:
-                        graph_request(
-                            "POST",
-                            f"https://graph.microsoft.com/v1.0/users/{mailbox_q}/messages/{quote(message_id)}/move",
-                            access_token,
-                            payload={"destinationId": processed_folder_id},
-                        )
-                    else:
-                        graph_request(
-                            "PATCH",
-                            f"https://graph.microsoft.com/v1.0/users/{mailbox_q}/messages/{quote(message_id)}",
-                            access_token,
-                            payload={"isRead": True},
-                        )
-                conn.commit()
-        except Exception as exc:
-            print(f"Graph email poller error: {exc}")
-        time.sleep(EMAIL_POLL_SECONDS)
-
-
 class Handler(BaseHTTPRequestHandler):
     def _send_json(self, payload: Any, code: int = 200) -> None:
         body = json.dumps(payload).encode("utf-8")
@@ -981,27 +659,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def run() -> None:
-    if EMAIL_POLL_ENABLED:
-        graph_ready = bool(GRAPH_TENANT_ID and GRAPH_CLIENT_ID and GRAPH_CLIENT_SECRET)
-        if graph_ready:
-            print("Email poller mode: GRAPH")
-            poller_target = poll_interest_form_graph_forever
-        else:
-            print("Email poller mode: IMAP (Graph vars missing)")
-            missing = []
-            if not GRAPH_TENANT_ID:
-                missing.append("HR_GRAPH_TENANT_ID")
-            if not GRAPH_CLIENT_ID:
-                missing.append("HR_GRAPH_CLIENT_ID")
-            if not GRAPH_CLIENT_SECRET:
-                missing.append("HR_GRAPH_CLIENT_SECRET")
-            if missing:
-                print("Missing Graph vars: " + ", ".join(missing))
-            poller_target = poll_interest_form_emails_forever
-        thread = threading.Thread(target=poller_target, daemon=True)
-        thread.start()
-    server = ThreadingHTTPServer(("127.0.0.1", 8000), Handler)
-    print("HR app running at http://127.0.0.1:8000")
+    server = ThreadingHTTPServer((SERVER_HOST, SERVER_PORT), Handler)
+    print(f"HR app running at http://{SERVER_HOST}:{SERVER_PORT}")
     server.serve_forever()
 
 
