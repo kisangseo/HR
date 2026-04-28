@@ -10,16 +10,8 @@
     <main class="container">
       <header>
         <h1>Job Applicants</h1>
-        <p>Upload CSV submissions and search by name, date, and position.</p>
+        <p>Search by name, date, and position.</p>
       </header>
-
-      <section class="panel">
-        <h2>CSV Ingest</h2>
-        <input type="file" id="csvFile" accept=".csv,text/csv" />
-        <button id="loadCsvBtn">Load CSV</button>
-        <p id="ingestStatus" class="status"></p>
-        <pre id="ingestDetails" class="ingest-details"></pre>
-      </section>
 
       <section class="panel filters">
         <h2>Search</h2>
@@ -29,16 +21,15 @@
             <input type="text" id="nameFilter" placeholder="e.g. Jane" />
           </label>
           <label>
-            Submission Date (from)
-            <input type="date" id="dateFromFilter" />
-          </label>
-          <label>
-            Submission Date (to)
-            <input type="date" id="dateToFilter" />
+            Submission Date
+            <input type="text" id="dateRangeFilter" placeholder="Select start and end date" readonly />
+            <input type="date" id="datePicker" hidden />
           </label>
           <label>
             Job Title
-            <input type="text" id="jobTitleFilter" placeholder="e.g. Deputy Sheriff" />
+            <select id="jobTitleFilter">
+              <option value="">All job titles</option>
+            </select>
           </label>
         </div>
         <div class="actions">
@@ -56,6 +47,7 @@
                 <th>Submission Date</th>
                 <th>Primary Position</th>
                 <th>Other Positions</th>
+                <th>Status</th>
                 <th>Email</th>
                 <th>Phone</th>
               </tr>
