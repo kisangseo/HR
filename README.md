@@ -79,6 +79,25 @@ Troubleshooting:
 - Azure App Service environment variables are only used by code running inside App Service (not your local terminal run).
 - Startup logs now print mailbox/sender config and top senders scanned so you can verify filtering.
 
+## Run email ingest from GitHub Actions
+
+This repo includes `.github/workflows/email_ingest_job.yml` to run `email_ingest.py` on a schedule (every 30 minutes) or manually.
+
+Set these repository secrets before enabling the workflow:
+- `HR_CLIENT_ID`
+- `HR_CLIENT_SECRET`
+- `HR_TENANT_ID`
+- `HR_SQL_CONNECTION_STRING`
+- `HR_MAILBOX_EMAIL`
+- `HR_JOB_APP_SENDER` (example: `noreply@baltimorecitysheriff.gov`)
+- `HR_JOB_APP_SENDER_MATCH_MODE` (`exact` or `contains`)
+- `HR_JOB_APP_SUBJECT_CONTAINS` (example: `Job Application`)
+- `HR_JOB_APP_INGEST_SOURCE` (example: `email` or `csv`)
+
+Then run:
+1. GitHub → **Actions** → **Email ingest job (Microsoft Graph -> SQL)**.
+2. Click **Run workflow** (optional `scan_limit` override).
+
 ### Azure App Service note
 
 This repo now exposes a WSGI callable named `app` in `app.py`, so Oryx/Gunicorn startup (`gunicorn app:app`) works without additional startup command overrides.

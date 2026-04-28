@@ -1,0 +1,52 @@
+name: Email ingest job (Microsoft Graph -> SQL)
+
+on:
+  workflow_dispatch:
+    inputs:
+      scan_limit:
+        description: "Maximum inbox emails to inspect for this run"
+        required: false
+        default: "500"
+  schedule:
+    - cron: "*/30 * * * *"
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ODBC driver (SQL Server)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl gnupg2 unixodbc-dev
+          curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
+          curl https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run email ingest
+        env:
+          CLIENT_ID: ${{ secrets.HR_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.HR_CLIENT_SECRET }}
+          TENANT_ID: ${{ secrets.HR_TENANT_ID }}
+          HR_SQL_CONNECTION_STRING: ${{ secrets.HR_SQL_CONNECTION_STRING }}
+          MAILBOX_EMAIL: ${{ secrets.HR_MAILBOX_EMAIL }}
+          JOB_APP_SENDER: ${{ secrets.HR_JOB_APP_SENDER }}
+          JOB_APP_SENDER_MATCH_MODE: ${{ secrets.HR_JOB_APP_SENDER_MATCH_MODE }}
+          JOB_APP_SUBJECT_CONTAINS: ${{ secrets.HR_JOB_APP_SUBJECT_CONTAINS }}
+          JOB_APP_INGEST_SOURCE: ${{ secrets.HR_JOB_APP_INGEST_SOURCE }}
+          INBOX_SCAN_LIMIT: ${{ github.event.inputs.scan_limit || '500' }}
+        run: |
+          python email_ingest.py --scan-limit "${INBOX_SCAN_LIMIT}"
