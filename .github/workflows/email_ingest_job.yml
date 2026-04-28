@@ -38,15 +38,30 @@ jobs:
 
       - name: Run email ingest
         env:
-          CLIENT_ID: ${{ secrets.HR_CLIENT_ID }}
-          CLIENT_SECRET: ${{ secrets.HR_CLIENT_SECRET }}
-          TENANT_ID: ${{ secrets.HR_TENANT_ID }}
-          HR_SQL_CONNECTION_STRING: ${{ secrets.HR_SQL_CONNECTION_STRING }}
-          MAILBOX_EMAIL: ${{ secrets.HR_MAILBOX_EMAIL }}
-          JOB_APP_SENDER: ${{ secrets.HR_JOB_APP_SENDER }}
-          JOB_APP_SENDER_MATCH_MODE: ${{ secrets.HR_JOB_APP_SENDER_MATCH_MODE }}
-          JOB_APP_SUBJECT_CONTAINS: ${{ secrets.HR_JOB_APP_SUBJECT_CONTAINS }}
-          JOB_APP_INGEST_SOURCE: ${{ secrets.HR_JOB_APP_INGEST_SOURCE }}
+          CLIENT_ID: ${{ secrets.HR_CLIENT_ID || secrets.CLIENT_ID || vars.HR_CLIENT_ID || vars.CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.HR_CLIENT_SECRET || secrets.CLIENT_SECRET || vars.HR_CLIENT_SECRET || vars.CLIENT_SECRET }}
+          TENANT_ID: ${{ secrets.HR_TENANT_ID || secrets.TENANT_ID || vars.HR_TENANT_ID || vars.TENANT_ID }}
+          HR_SQL_CONNECTION_STRING: ${{ secrets.HR_SQL_CONNECTION_STRING || vars.HR_SQL_CONNECTION_STRING }}
+          MAILBOX_EMAIL: ${{ secrets.HR_MAILBOX_EMAIL || secrets.MAILBOX_EMAIL || vars.HR_MAILBOX_EMAIL || vars.MAILBOX_EMAIL }}
+          JOB_APP_SENDER: ${{ secrets.HR_JOB_APP_SENDER || vars.HR_JOB_APP_SENDER || 'noreply@baltimorecitysheriff.gov' }}
+          JOB_APP_SENDER_MATCH_MODE: ${{ secrets.HR_JOB_APP_SENDER_MATCH_MODE || vars.HR_JOB_APP_SENDER_MATCH_MODE || 'exact' }}
+          JOB_APP_SUBJECT_CONTAINS: ${{ secrets.HR_JOB_APP_SUBJECT_CONTAINS || vars.HR_JOB_APP_SUBJECT_CONTAINS || 'Job Application' }}
+          JOB_APP_INGEST_SOURCE: ${{ secrets.HR_JOB_APP_INGEST_SOURCE || vars.HR_JOB_APP_INGEST_SOURCE || 'email' }}
           INBOX_SCAN_LIMIT: ${{ github.event.inputs.scan_limit || '500' }}
         run: |
+          echo "MAILBOX_EMAIL set? $( [ -n "${MAILBOX_EMAIL}" ] && echo yes || echo no )"
+          echo "CLIENT_ID set? $( [ -n "${CLIENT_ID}" ] && echo yes || echo no )"
+          echo "TENANT_ID set? $( [ -n "${TENANT_ID}" ] && echo yes || echo no )"
+          echo "HR_SQL_CONNECTION_STRING set? $( [ -n "${HR_SQL_CONNECTION_STRING}" ] && echo yes || echo no )"
+          missing=0
+          for var in CLIENT_ID CLIENT_SECRET TENANT_ID HR_SQL_CONNECTION_STRING MAILBOX_EMAIL; do
+            if [ -z "${!var}" ]; then
+              echo "::error title=Missing required secret::${var} is empty or unset for GitHub Actions runtime."
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "Set repository/org/environment secrets in GitHub. Azure App Service settings are not automatically available in GitHub Actions."
+            exit 1
+          fi
           python email_ingest.py --scan-limit "${INBOX_SCAN_LIMIT}"

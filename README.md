@@ -94,6 +94,12 @@ Set these repository secrets before enabling the workflow:
 - `HR_JOB_APP_SUBJECT_CONTAINS` (example: `Job Application`)
 - `HR_JOB_APP_INGEST_SOURCE` (example: `email` or `csv`)
 
+Important:
+- Yes, you must set mailbox/auth values in **GitHub Secrets** for the GitHub workflow.
+- Azure App Service environment variables are separate and are not automatically injected into GitHub Actions runs.
+- Workflow now supports either **Secrets** or **Variables** (`vars`) for these names; secrets are still recommended.
+- If logs still show old behavior, make sure the latest workflow commit is on the branch you are running in Actions.
+
 Then run:
 1. GitHub → **Actions** → **Email ingest job (Microsoft Graph -> SQL)**.
 2. Click **Run workflow** (optional `scan_limit` override).
