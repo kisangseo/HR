@@ -571,7 +571,7 @@ def query_job_titles() -> list[str]:
     return [str(row[0]).strip() for row in rows if str(row[0]).strip()]
 
 
-def run_email_ingest(scan_limit: int, source_folder: str = "inbox") -> dict[str, Any]:
+def run_email_ingest(scan_limit: int, source_folder: str = "all") -> dict[str, Any]:
     from email_ingest import run_ingest
 
     return run_ingest(scan_limit=max(scan_limit, 1), source_folder=source_folder)
@@ -646,9 +646,9 @@ def app(environ, start_response):
                 scan_limit = int((query.get("scan_limit") or ["500"])[0] or "500")
             except ValueError:
                 scan_limit = 500
-            source_folder = ((query.get("source_folder") or ["inbox"])[0] or "inbox").strip().lower()
-            if source_folder not in {"inbox", "processed"}:
-                source_folder = "inbox"
+            source_folder = ((query.get("source_folder") or ["all"])[0] or "all").strip().lower()
+            if source_folder not in {"all", "inbox", "processed"}:
+                source_folder = "all"
             try:
                 result = run_email_ingest(scan_limit=scan_limit, source_folder=source_folder)
                 logging.info("/run-ingest completed source_folder=%s scan_limit=%s result=%s", source_folder, scan_limit, result)
@@ -799,9 +799,9 @@ class Handler(BaseHTTPRequestHandler):
                 scan_limit = int((query.get("scan_limit") or ["500"])[0] or "500")
             except ValueError:
                 scan_limit = 500
-            source_folder = ((query.get("source_folder") or ["inbox"])[0] or "inbox").strip().lower()
-            if source_folder not in {"inbox", "processed"}:
-                source_folder = "inbox"
+            source_folder = ((query.get("source_folder") or ["all"])[0] or "all").strip().lower()
+            if source_folder not in {"all", "inbox", "processed"}:
+                source_folder = "all"
             try:
                 result = run_email_ingest(scan_limit=scan_limit, source_folder=source_folder)
                 logging.info("/run-ingest completed source_folder=%s scan_limit=%s result=%s", source_folder, scan_limit, result)

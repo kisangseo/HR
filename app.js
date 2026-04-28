@@ -94,7 +94,7 @@ async function loadApplicants() {
 
 function renderTable(applicants) {
   if (!applicants.length) {
-    els.applicantRows.innerHTML = '<tr><td colspan="6">No applicants found.</td></tr>';
+    els.applicantRows.innerHTML = '<tr><td colspan="7">No applicants found.</td></tr>';
     return;
   }
 
@@ -109,6 +109,7 @@ function renderTable(applicants) {
         <td>${formatDate(applicant.submittedAt)}</td>
         <td>${escapeHtml(primary)}</td>
         <td>${escapeHtml(other)}</td>
+        <td>${escapeHtml(applicant.status || '—')}</td>
         <td>${escapeHtml(applicant.email || '—')}</td>
         <td>${escapeHtml(applicant.phone || '—')}</td>
       </tr>`;

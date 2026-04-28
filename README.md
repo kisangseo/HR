@@ -60,18 +60,19 @@ export JOB_APP_SENDER=noreply@baltimorecitysheriff.gov
 export JOB_APP_SENDER_MATCH_MODE=exact  # exact | contains
 export JOB_APP_SUBJECT_CONTAINS="Job Application"
 export INBOX_SCAN_LIMIT=500
-# defaults to csv so existing source='csv' queries continue to work
-export JOB_APP_INGEST_SOURCE=csv
+# defaults to email
+export JOB_APP_INGEST_SOURCE=email
 
 python3 email_ingest.py
 ```
 
 Behavior:
 - Scans the main Inbox.
+- `/run-ingest` defaults to scanning both Inbox and `processed` folders (`source_folder=all`).
 - Processes messages where sender equals `JOB_APP_SENDER` and subject contains `JOB_APP_SUBJECT_CONTAINS` (case-insensitive).
 - Parses fixed labels: Name, Email, Phone Number, Primary Position You Are Applying For, Other Interested Positions.
 - Stores `other_positions` as JSON array split by comma/newline.
-- Inserts every matching email (no dedupe), with source defaulting to `csv`.
+- Inserts every matching email (no dedupe), with source defaulting to `email`.
 - Moves every matching/processed job-application email into Inbox child folder `processed`.
 
 Recovery tip:

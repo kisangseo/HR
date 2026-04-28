@@ -24,7 +24,7 @@ SENDER_MATCH_MODE = (os.getenv("JOB_APP_SENDER_MATCH_MODE", "exact") or "exact")
 SUBJECT_CONTAINS = (os.getenv("JOB_APP_SUBJECT_CONTAINS", "Job Application") or "").strip().lower()
 INBOX_SCAN_LIMIT = int(os.getenv("INBOX_SCAN_LIMIT", "500"))
 SQL_CONNECTION_STRING = (os.getenv("HR_SQL_CONNECTION_STRING") or "").strip()
-INGEST_SOURCE = (os.getenv("JOB_APP_INGEST_SOURCE", "csv") or "csv").strip()
+INGEST_SOURCE = (os.getenv("JOB_APP_INGEST_SOURCE", "email") or "email").strip()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -330,14 +330,20 @@ def is_target_job_application(message: dict[str, Any]) -> bool:
     return sender_matches and SUBJECT_CONTAINS in subject
 
 
-def run_ingest(scan_limit: int, source_folder: str = "inbox") -> dict[str, int]:
+def run_ingest(scan_limit: int, source_folder: str = "all") -> dict[str, int]:
     if not MAILBOX_EMAIL:
         raise RuntimeError("MAILBOX_EMAIL is not set")
 
     token = get_access_token()
     processed_folder_id = get_processed_folder_id(token, MAILBOX_EMAIL)
-    source_folder_normalized = (source_folder or "inbox").strip().lower()
-    source_folder_id = "inbox" if source_folder_normalized == "inbox" else processed_folder_id
+    source_folder_normalized = (source_folder or "all").strip().lower()
+    if source_folder_normalized == "inbox":
+        folder_targets: list[tuple[str, str]] = [("inbox", "inbox")]
+    elif source_folder_normalized == "processed":
+        folder_targets = [("processed", processed_folder_id)]
+    else:
+        source_folder_normalized = "all"
+        folder_targets = [("inbox", "inbox"), ("processed", processed_folder_id)]
 
     logging.info(
         "Email ingest config: mailbox=%s target_sender=%s sender_match_mode=%s subject_contains=%s scan_limit=%s",
@@ -350,16 +356,19 @@ def run_ingest(scan_limit: int, source_folder: str = "inbox") -> dict[str, int]:
     logging.info("Scanning source folder: %s", source_folder_normalized)
     logging.info("DB table target: %s", APPLICATIONS_TABLE)
 
-    messages = fetch_folder_messages(token, MAILBOX_EMAIL, source_folder_id, max(scan_limit, 1))
-    logging.info("Fetched %d inbox messages", len(messages))
+    messages_with_origin: list[tuple[dict[str, Any], str]] = []
+    for origin_name, folder_id in folder_targets:
+        folder_messages = fetch_folder_messages(token, MAILBOX_EMAIL, folder_id, max(scan_limit, 1))
+        logging.info("Fetched %d messages from %s", len(folder_messages), origin_name)
+        messages_with_origin.extend((message, origin_name) for message in folder_messages)
 
-    if messages:
+    if messages_with_origin:
         sender_counts: dict[str, int] = {}
-        for message in messages:
+        for message, _origin in messages_with_origin:
             sender = extract_sender_address(message)
             sender_counts[sender] = sender_counts.get(sender, 0) + 1
         top_senders = sorted(sender_counts.items(), key=lambda item: item[1], reverse=True)[:5]
-        logging.info("Top senders in scanned inbox messages: %s", top_senders)
+        logging.info("Top senders in scanned messages: %s", top_senders)
 
     inserted = 0
     moved = 0
@@ -368,7 +377,7 @@ def run_ingest(scan_limit: int, source_folder: str = "inbox") -> dict[str, int]:
     with get_sql_connection() as conn:
         cursor = conn.cursor()
 
-        for message in messages:
+        for message, origin_name in messages_with_origin:
             message_id = (message.get("id") or "").strip()
             if not message_id:
                 continue
@@ -387,7 +396,7 @@ def run_ingest(scan_limit: int, source_folder: str = "inbox") -> dict[str, int]:
                 logging.exception("Insert failed for message_id=%s", message_id)
                 continue
 
-            if source_folder_normalized == "inbox":
+            if origin_name == "inbox":
                 move_email_to_processed_folder(token, MAILBOX_EMAIL, message_id, processed_folder_id)
                 moved += 1
 
@@ -395,12 +404,12 @@ def run_ingest(scan_limit: int, source_folder: str = "inbox") -> dict[str, int]:
 
     logging.info(
         "Email ingest complete: scanned=%d matched=%d inserted=%d moved=%d",
-        len(messages),
+        len(messages_with_origin),
         matched,
         inserted,
         moved,
     )
-    return {"scanned": len(messages), "matched": matched, "inserted": inserted, "moved": moved}
+    return {"scanned": len(messages_with_origin), "matched": matched, "inserted": inserted, "moved": moved}
 
 
 def main() -> None:
@@ -408,9 +417,9 @@ def main() -> None:
     cli.add_argument("--scan-limit", type=int, default=INBOX_SCAN_LIMIT, help="Maximum inbox emails to inspect")
     cli.add_argument(
         "--source-folder",
-        choices=["inbox", "processed"],
-        default="inbox",
-        help="Mailbox folder to scan. Use 'processed' to recover previously moved emails.",
+        choices=["all", "inbox", "processed"],
+        default="all",
+        help="Folder scope: all (inbox + processed), inbox only, or processed only.",
     )
     args = cli.parse_args()
     run_ingest(max(args.scan_limit, 1), source_folder=args.source_folder)
