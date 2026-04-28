@@ -92,8 +92,8 @@ def get_processed_folder_id(token: str, mailbox_email: str) -> str:
     raise RuntimeError(f"Unable to locate '{PROCESSED_FOLDER_NAME}' folder under Inbox")
 
 
-def fetch_inbox_messages(token: str, mailbox_email: str, scan_limit: int) -> list[dict[str, Any]]:
-    endpoint = f"{GRAPH_BASE}/users/{mailbox_email}/mailFolders/inbox/messages"
+def fetch_folder_messages(token: str, mailbox_email: str, folder_id: str, scan_limit: int) -> list[dict[str, Any]]:
+    endpoint = f"{GRAPH_BASE}/users/{mailbox_email}/mailFolders/{folder_id}/messages"
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -150,6 +150,7 @@ def strip_html_to_text(body_html: str) -> str:
     body_html = re.sub(r"</div\\s*>", "\n", body_html, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", "", body_html)
     text = html.unescape(text)
+    text = text.replace("\xa0", " ")
     text = text.replace("\r", "")
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
@@ -157,36 +158,36 @@ def strip_html_to_text(body_html: str) -> str:
 
 def parse_job_application_email(body_html: str) -> ParsedApplication:
     text = strip_html_to_text(body_html)
+    label_map = {
+        "name": "name",
+        "email": "email",
+        "phone number": "phone",
+        "primary position you are applying for": "primary_position",
+        "other interested positions": "other_positions",
+    }
+    known_labels = set(label_map.keys()) | {"sent from"}
+    collected: dict[str, list[str]] = {key: [] for key in label_map.values()}
+    current_key: str | None = None
 
-    def capture(label: str, next_labels: list[str], *, preserve_newlines: bool = False) -> str:
-        escaped_label = re.escape(label)
-        next_pattern = "|".join(re.escape(value) for value in next_labels)
-        pattern = rf"(?is)\b{escaped_label}\b\s*(.*?)\s*(?=\b(?:{next_pattern})\b|$)"
-        match = re.search(pattern, text)
-        if not match:
-            return ""
-        value = match.group(1)
-        value = re.sub(r"^[\s:.-]+", "", value)
-        if preserve_newlines:
-            value = "\n".join(line.strip() for line in value.splitlines()).strip()
-        else:
-            value = re.sub(r"\s+", " ", value).strip()
-        return value
+    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
+    for line in lines:
+        if not line:
+            continue
+        normalized_line = line.lower().rstrip(":")
+        if normalized_line in known_labels:
+            if normalized_line == "sent from":
+                current_key = None
+                continue
+            current_key = label_map[normalized_line]
+            continue
+        if current_key:
+            collected[current_key].append(line)
 
-    labels = [
-        "Name",
-        "Email",
-        "Phone Number",
-        "Primary Position You Are Applying For",
-        "Other Interested Positions",
-        "Sent from",
-    ]
-
-    name = capture("Name", labels[1:])
-    email_value = capture("Email", labels[2:])
-    phone = capture("Phone Number", labels[3:])
-    primary_position = capture("Primary Position You Are Applying For", labels[4:])
-    other_raw = capture("Other Interested Positions", labels[5:], preserve_newlines=True)
+    name = " ".join(collected["name"]).strip()
+    email_value = " ".join(collected["email"]).strip()
+    phone = " ".join(collected["phone"]).strip()
+    primary_position = " ".join(collected["primary_position"]).strip()
+    other_raw = "\n".join(collected["other_positions"]).strip()
 
     other_parts = [
         part.strip()
@@ -205,6 +206,16 @@ def parse_job_application_email(body_html: str) -> ParsedApplication:
     )
 
 
+def parse_name_from_subject(subject: str) -> str:
+    text = (subject or "").strip()
+    if not text:
+        return ""
+    match = re.search(r"job application(?: form)?\s+(.+)$", text, flags=re.IGNORECASE)
+    if not match:
+        return ""
+    return re.sub(r"\s+", " ", match.group(1)).strip()
+
+
 def split_name(full_name: str) -> tuple[str, str]:
     value = (full_name or "").strip()
     if not value:
@@ -216,7 +227,11 @@ def split_name(full_name: str) -> tuple[str, str]:
 
 
 def insert_application(cursor: pyodbc.Cursor, parsed: ParsedApplication, message: dict[str, Any]) -> None:
-    first_name, last_name = split_name(parsed.get("name", ""))
+    subject = message.get("subject") or ""
+    parsed_name = (parsed.get("name") or "").strip()
+    if not parsed_name:
+        parsed_name = parse_name_from_subject(subject)
+    first_name, last_name = split_name(parsed_name)
 
     submitted_at_raw = message.get("receivedDateTime") or message.get("sentDateTime")
     submitted_at_dt = datetime.now(timezone.utc)
@@ -231,7 +246,7 @@ def insert_application(cursor: pyodbc.Cursor, parsed: ParsedApplication, message
         "subject": message.get("subject") or "",
         "sender": extract_sender_address(message),
         "parsed": {
-            "name": parsed.get("name", ""),
+            "name": parsed_name,
             "email": parsed.get("email", ""),
             "phone": parsed.get("phone", ""),
             "primary_position": parsed.get("primary_position", ""),
@@ -271,12 +286,14 @@ def is_target_job_application(message: dict[str, Any]) -> bool:
     return sender_matches and SUBJECT_CONTAINS in subject
 
 
-def run_ingest(scan_limit: int) -> dict[str, int]:
+def run_ingest(scan_limit: int, source_folder: str = "inbox") -> dict[str, int]:
     if not MAILBOX_EMAIL:
         raise RuntimeError("MAILBOX_EMAIL is not set")
 
     token = get_access_token()
     processed_folder_id = get_processed_folder_id(token, MAILBOX_EMAIL)
+    source_folder_normalized = (source_folder or "inbox").strip().lower()
+    source_folder_id = "inbox" if source_folder_normalized == "inbox" else processed_folder_id
 
     logging.info(
         "Email ingest config: mailbox=%s target_sender=%s sender_match_mode=%s subject_contains=%s scan_limit=%s",
@@ -286,8 +303,9 @@ def run_ingest(scan_limit: int) -> dict[str, int]:
         SUBJECT_CONTAINS,
         max(scan_limit, 1),
     )
+    logging.info("Scanning source folder: %s", source_folder_normalized)
 
-    messages = fetch_inbox_messages(token, MAILBOX_EMAIL, max(scan_limit, 1))
+    messages = fetch_folder_messages(token, MAILBOX_EMAIL, source_folder_id, max(scan_limit, 1))
     logging.info("Fetched %d inbox messages", len(messages))
 
     if messages:
@@ -320,8 +338,9 @@ def run_ingest(scan_limit: int) -> dict[str, int]:
             insert_application(cursor, parsed, message)
             inserted += 1
 
-            move_email_to_processed_folder(token, MAILBOX_EMAIL, message_id, processed_folder_id)
-            moved += 1
+            if source_folder_normalized == "inbox":
+                move_email_to_processed_folder(token, MAILBOX_EMAIL, message_id, processed_folder_id)
+                moved += 1
 
         conn.commit()
 
@@ -338,8 +357,14 @@ def run_ingest(scan_limit: int) -> dict[str, int]:
 def main() -> None:
     cli = argparse.ArgumentParser(description="Ingest Baltimore Sheriff job-application emails into SQL Server.")
     cli.add_argument("--scan-limit", type=int, default=INBOX_SCAN_LIMIT, help="Maximum inbox emails to inspect")
+    cli.add_argument(
+        "--source-folder",
+        choices=["inbox", "processed"],
+        default="inbox",
+        help="Mailbox folder to scan. Use 'processed' to recover previously moved emails.",
+    )
     args = cli.parse_args()
-    run_ingest(max(args.scan_limit, 1))
+    run_ingest(max(args.scan_limit, 1), source_folder=args.source_folder)
 
 
 if __name__ == "__main__":

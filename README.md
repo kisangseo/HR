@@ -74,6 +74,11 @@ Behavior:
 - Inserts every matching email (no dedupe), with source defaulting to `csv`.
 - Moves every matching/processed job-application email into Inbox child folder `processed`.
 
+Recovery tip:
+- If emails were moved to `processed` but not inserted correctly, re-run against processed folder:
+  - CLI: `python3 email_ingest.py --source-folder processed --scan-limit 500`
+  - Endpoint: `/run-ingest?source_folder=processed&scan_limit=500`
+
 Troubleshooting:
 - The script reads environment variables from the shell/session where `python3 email_ingest.py` runs.
 - Azure App Service environment variables are only used by code running inside App Service (not your local terminal run).
