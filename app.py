@@ -624,7 +624,19 @@ class Handler(BaseHTTPRequestHandler):
 
             try:
                 payload = parse_json_body(body)
-                mapped = build_record_from_make(payload)
+
+                # NEW: handle raw email from MAKE
+                if "body" in payload:
+                    email_text = payload.get("body", "")
+                    fields = extract_email_fields(email_text)
+
+                    mapped = build_record_from_email(
+                        fields,
+                        submitted_at=payload.get("received"),
+                        raw_payload=payload
+                    )
+                else:
+                    mapped = build_record_from_make(payload)
                 if not mapped:
                     self._send_json({"error": "Could not parse applicant name from payload."}, 400)
                     return
