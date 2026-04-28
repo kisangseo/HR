@@ -660,8 +660,19 @@ def app(environ, start_response):
                 return _wsgi_json(start_response, {"error": "Unauthorized webhook token."}, 401)
 
             try:
-                payload = parse_json_body(body_text)
-                mapped = build_record_from_make(payload)
+                payload = parse_json_body(body)
+
+                if "body" in payload:
+                    fields = extract_email_fields(str(payload.get("body") or ""))
+                    submitted_at = parse_submitted_at(str(payload.get("received") or "")) or datetime.now(timezone.utc).date().isoformat()
+
+                    mapped = build_record_from_email(
+                        fields,
+                        submitted_at=submitted_at,
+                        raw_payload=payload,
+                    )
+                else:
+                    mapped = build_record_from_make(payload)
                 if not mapped:
                     return _wsgi_json(start_response, {"error": "Could not parse applicant name from payload."}, 400)
                 if contains_test_name(mapped["full_name"]):
@@ -770,7 +781,19 @@ class Handler(BaseHTTPRequestHandler):
 
             try:
                 payload = parse_json_body(body)
-                mapped = build_record_from_make(payload)
+
+                # NEW: handle raw email from MAKE
+                if "body" in payload:
+                    email_text = payload.get("body", "")
+                    fields = extract_email_fields(email_text)
+
+                    mapped = build_record_from_email(
+                        fields,
+                        submitted_at=payload.get("received"),
+                        raw_payload=payload
+                    )
+                else:
+                    mapped = build_record_from_make(payload)
                 if not mapped:
                     self._send_json({"error": "Could not parse applicant name from payload."}, 400)
                     return
