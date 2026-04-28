@@ -3,7 +3,9 @@ from __future__ import annotations
 import csv
 import io
 import json
+import logging
 import os
+import re
 from collections import Counter
 from datetime import datetime, timezone
 from io import BytesIO
@@ -20,6 +22,7 @@ ROOT = Path(__file__).resolve().parent
 APP_VERSION = "2026-04-27.ingest-diagnostics-v3"
 SQL_CONNECTION_STRING = os.getenv("HR_SQL_CONNECTION_STRING", "").strip()
 MAKE_WEBHOOK_TOKEN = os.getenv("HR_MAKE_WEBHOOK_TOKEN", "").strip()
+RUN_INGEST_TOKEN = os.getenv("HR_RUN_INGEST_TOKEN", "").strip()
 SERVER_HOST = os.getenv("HR_HOST", "127.0.0.1").strip() or "127.0.0.1"
 SERVER_PORT = int(os.getenv("PORT") or os.getenv("HR_PORT") or "8000")
 
@@ -43,6 +46,20 @@ ALIASES = {
     ],
 }
 
+POSITION_CANONICAL = {
+    "court security officer": "Court Security Officer",
+    "deputy sheriff": "Deputy Sheriff",
+    "radio dispatcher": "Radio Dispatcher",
+    "information technology": "Information Technology",
+    "communications": "Communications",
+    "social worker": "Social Worker",
+    "other": "Other",
+}
+POSITION_SPLIT_PATTERN = re.compile(
+    r"(court security officer|deputy sheriff|radio dispatcher|information technology|communications|social worker|other)",
+    flags=re.IGNORECASE,
+)
+
 def get_sql_connection():
     if pyodbc is None:
         raise RuntimeError(
@@ -56,6 +73,37 @@ def get_sql_connection():
 def normalize_key(value: str) -> str:
     normalized = " ".join(value.strip().lower().split())
     return normalized.lstrip("\ufeff")
+
+
+def strip_sent_from_suffix(value: str) -> str:
+    return re.sub(
+        r"(?is)\s*sent from the baltimore city sheriff[’']?s office.*$",
+        "",
+        (value or "").strip(),
+    ).strip(" ,;-")
+
+
+def split_positions_text(value: str) -> list[str]:
+    text = strip_sent_from_suffix(value)
+    if text in {"—", "-", "--"}:
+        return []
+    if not text:
+        return []
+    if "," in text or ";" in text or "|" in text:
+        base_parts = split_multi_value(text)
+    else:
+        matches = POSITION_SPLIT_PATTERN.findall(text)
+        base_parts = matches if len(matches) > 1 else [text]
+
+    normalized: list[str] = []
+    for part in base_parts:
+        key = " ".join((part or "").strip().lower().split())
+        if not key:
+            continue
+        if key in {"—", "-", "--"}:
+            continue
+        normalized.append(POSITION_CANONICAL.get(key, part.strip()))
+    return normalized
 
 
 def split_multi_value(value: str) -> list[str]:
@@ -248,7 +296,7 @@ def map_row(raw_row: dict[str, str]) -> tuple[dict[str, Any] | None, list[str]]:
 def insert_mapped_record(cursor, mapped: dict[str, Any]) -> None:
     cursor.execute(
         """
-        INSERT INTO job_applications (
+        INSERT INTO dbo.job_applications (
             submitted_at, first_name, last_name, email, phone,
             primary_position, other_positions, status, source, raw_payload
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -332,6 +380,8 @@ def build_record_from_make(payload: dict[str, Any]) -> dict[str, Any] | None:
         "raw_payload": payload,
     }
 
+# Legacy CSV ingest helper retained for possible future re-enable.
+# API routes for /api/ingest-csv are currently disabled.
 def ingest_csv(csv_text: str) -> dict[str, Any]:
     clean_text = csv_text.replace("\x00", "")
     sample = clean_text[:4096]
@@ -466,7 +516,7 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
         SELECT
             id, submitted_at, full_name, email, phone,
             primary_position, other_positions, status, source
-        FROM job_applications
+        FROM dbo.job_applications
         WHERE 1 = 1
     """
 
@@ -501,6 +551,15 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
             submitted_text = submitted_value.date().isoformat()
         else:
             submitted_text = str(submitted_value)[:10]
+        raw_other_positions = json.loads(row[6] or "[]")
+        if not isinstance(raw_other_positions, list):
+            raw_other_positions = []
+        primary_parts = split_positions_text(row[5] or "")
+        primary_clean = primary_parts[0] if primary_parts else (strip_sent_from_suffix(str(row[5] or "")) or "—")
+        other_clean: list[str] = []
+        for value in raw_other_positions:
+            other_clean.extend(split_positions_text(str(value)))
+        other_clean = [value for value in other_clean if value and value.lower() != primary_clean.lower()]
         raw_output.append(
             {
                 "id": row[0],
@@ -508,8 +567,8 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
                 "name": row[2],
                 "email": row[3],
                 "phone": row[4],
-                "primaryPosition": row[5],
-                "otherPositions": json.loads(row[6] or "[]"),
+                "primaryPosition": primary_clean,
+                "otherPositions": list(dict.fromkeys(other_clean)),
                 "status": row[7],
                 "source": row[8],
             }
@@ -519,19 +578,22 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
     # - combine same-name applicants into one row, merging positions
     grouped: dict[str, dict[str, Any]] = {}
     for item in raw_output:
+        if not (item.get("name") or "").strip():
+            continue
         if contains_test_name(item["name"]):
             continue
         key = item["name"].strip().lower()
         if key not in grouped:
+            initial_positions = {p for p in [item["primaryPosition"], *item["otherPositions"]] if p and p != "—"}
             grouped[key] = {
                 **item,
-                "allPositions": set([item["primaryPosition"]]) | set(item["otherPositions"]),
+                "allPositions": initial_positions,
             }
             continue
 
         existing = grouped[key]
-        existing["allPositions"].update([item["primaryPosition"]])
-        existing["allPositions"].update(item["otherPositions"])
+        existing["allPositions"].update([p for p in [item["primaryPosition"]] if p and p != "—"])
+        existing["allPositions"].update([p for p in item["otherPositions"] if p and p != "—"])
         # Keep latest submission date row as base
         if item["submittedAt"] > existing["submittedAt"]:
             existing["submittedAt"] = item["submittedAt"]
@@ -551,6 +613,31 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
 
     output.sort(key=lambda item: item["submittedAt"], reverse=True)
     return output
+
+
+def query_job_titles() -> list[str]:
+    sql = """
+        SELECT DISTINCT primary_position
+        FROM dbo.job_applications
+        WHERE primary_position IS NOT NULL
+          AND LTRIM(RTRIM(primary_position)) <> ''
+        ORDER BY primary_position ASC
+    """
+    with get_sql_connection() as conn:
+        cursor = conn.cursor()
+        rows = cursor.execute(sql).fetchall()
+    cleaned: list[str] = []
+    for row in rows:
+        for value in split_positions_text(str(row[0] or "")):
+            if value:
+                cleaned.append(value)
+    return sorted(set(cleaned), key=lambda item: item.lower())
+
+
+def run_email_ingest(scan_limit: int, source_folder: str = "all") -> dict[str, Any]:
+    from email_ingest import run_ingest
+
+    return run_ingest(scan_limit=max(scan_limit, 1), source_folder=source_folder)
 
 
 def _http_status(code: int) -> str:
@@ -614,6 +701,24 @@ def app(environ, start_response):
             return _wsgi_file(start_response, STATIC_CSS, "text/css; charset=utf-8")
         if path == "/api/version":
             return _wsgi_json(start_response, {"app_version": APP_VERSION, "db_backend": "sqlserver"})
+        if path == "/run-ingest":
+            provided_token = environ.get("HTTP_X_RUN_TOKEN", "") or (query.get("token") or [""])[0]
+            if RUN_INGEST_TOKEN and provided_token != RUN_INGEST_TOKEN:
+                return _wsgi_json(start_response, {"error": "Unauthorized run token."}, 401)
+            try:
+                scan_limit = int((query.get("scan_limit") or ["500"])[0] or "500")
+            except ValueError:
+                scan_limit = 500
+            source_folder = ((query.get("source_folder") or ["all"])[0] or "all").strip().lower()
+            if source_folder not in {"all", "inbox", "processed"}:
+                source_folder = "all"
+            try:
+                result = run_email_ingest(scan_limit=scan_limit, source_folder=source_folder)
+                logging.info("/run-ingest completed source_folder=%s scan_limit=%s result=%s", source_folder, scan_limit, result)
+                return _wsgi_json(start_response, {"ok": True, **result})
+            except Exception as exc:
+                logging.exception("/run-ingest failed source_folder=%s scan_limit=%s", source_folder, scan_limit)
+                return _wsgi_json(start_response, {"error": str(exc)}, 500)
         if path == "/api/applicants":
             filters = {
                 "name": (query.get("name") or [""])[0],
@@ -624,6 +729,12 @@ def app(environ, start_response):
             try:
                 data = query_applicants(filters)
                 return _wsgi_json(start_response, {"applicants": data})
+            except Exception as exc:
+                return _wsgi_json(start_response, {"error": str(exc)}, 500)
+        if path == "/api/job-titles":
+            try:
+                titles = query_job_titles()
+                return _wsgi_json(start_response, {"job_titles": titles})
             except Exception as exc:
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
         return _wsgi_json(start_response, {"error": "Not Found"}, 404)
@@ -653,13 +764,16 @@ def app(environ, start_response):
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
 
         if path == "/api/ingest-csv":
-            if not body_text.strip():
-                return _wsgi_json(start_response, {"error": "CSV payload is empty."}, 400)
-            try:
-                result = ingest_csv(body_text)
-                return _wsgi_json(start_response, result)
-            except Exception as exc:
-                return _wsgi_json(start_response, {"error": str(exc)}, 500)
+            # CSV ingest is intentionally disabled for now to avoid manual user uploads.
+            # Legacy handler kept commented for quick restore:
+            # if not body_text.strip():
+            #     return _wsgi_json(start_response, {"error": "CSV payload is empty."}, 400)
+            # try:
+            #     result = ingest_csv(body_text)
+            #     return _wsgi_json(start_response, result)
+            # except Exception as exc:
+            #     return _wsgi_json(start_response, {"error": str(exc)}, 500)
+            return _wsgi_json(start_response, {"error": "CSV ingest is disabled."}, 410)
 
         return _wsgi_json(start_response, {"error": "Not Found"}, 404)
 
@@ -716,8 +830,37 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(exc)}, 500)
             return
 
+        if parsed.path == "/api/job-titles":
+            try:
+                self._send_json({"job_titles": query_job_titles()})
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, 500)
+            return
+
         if parsed.path == "/api/version":
             self._send_json({"app_version": APP_VERSION, "db_backend": "sqlserver"})
+            return
+
+        if parsed.path == "/run-ingest":
+            query = parse_qs(parsed.query)
+            provided_token = self.headers.get("X-Run-Token", "") or (query.get("token") or [""])[0]
+            if RUN_INGEST_TOKEN and provided_token != RUN_INGEST_TOKEN:
+                self._send_json({"error": "Unauthorized run token."}, 401)
+                return
+            try:
+                scan_limit = int((query.get("scan_limit") or ["500"])[0] or "500")
+            except ValueError:
+                scan_limit = 500
+            source_folder = ((query.get("source_folder") or ["all"])[0] or "all").strip().lower()
+            if source_folder not in {"all", "inbox", "processed"}:
+                source_folder = "all"
+            try:
+                result = run_email_ingest(scan_limit=scan_limit, source_folder=source_folder)
+                logging.info("/run-ingest completed source_folder=%s scan_limit=%s result=%s", source_folder, scan_limit, result)
+                self._send_json({"ok": True, **result})
+            except Exception as exc:
+                logging.exception("/run-ingest failed source_folder=%s scan_limit=%s", source_folder, scan_limit)
+                self._send_json({"error": str(exc)}, 500)
             return
 
         self.send_error(404)
@@ -758,18 +901,21 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
 
-        content_length = int(self.headers.get("Content-Length", "0"))
-        body = self.rfile.read(content_length).decode("utf-8")
-
-        if not body.strip():
-            self._send_json({"error": "CSV payload is empty."}, 400)
-            return
-
-        try:
-            result = ingest_csv(body)
-            self._send_json(result)
-        except Exception as exc:
-            self._send_json({"error": str(exc)}, 500)
+        # CSV ingest is intentionally disabled for now to avoid manual user uploads.
+        # Legacy handler kept commented for quick restore:
+        # content_length = int(self.headers.get("Content-Length", "0"))
+        # body = self.rfile.read(content_length).decode("utf-8")
+        #
+        # if not body.strip():
+        #     self._send_json({"error": "CSV payload is empty."}, 400)
+        #     return
+        #
+        # try:
+        #     result = ingest_csv(body)
+        #     self._send_json(result)
+        # except Exception as exc:
+        #     self._send_json({"error": str(exc)}, 500)
+        self._send_json({"error": "CSV ingest is disabled."}, 410)
 
 
 def run() -> None:
