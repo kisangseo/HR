@@ -45,11 +45,12 @@ label {
   font-size: 14px;
 }
 
-input, button {
+input, select, button {
   font-size: 14px;
   padding: 8px 10px;
   border: 1px solid #c8d1e3;
   border-radius: 8px;
+  background: #fff;
 }
 
 button {

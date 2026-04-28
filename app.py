@@ -555,6 +555,20 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
     return output
 
 
+def query_job_titles() -> list[str]:
+    sql = """
+        SELECT DISTINCT primary_position
+        FROM job_applications
+        WHERE primary_position IS NOT NULL
+          AND LTRIM(RTRIM(primary_position)) <> ''
+        ORDER BY primary_position ASC
+    """
+    with get_sql_connection() as conn:
+        cursor = conn.cursor()
+        rows = cursor.execute(sql).fetchall()
+    return [str(row[0]).strip() for row in rows if str(row[0]).strip()]
+
+
 def _http_status(code: int) -> str:
     phrases = {
         200: "OK",
@@ -626,6 +640,12 @@ def app(environ, start_response):
             try:
                 data = query_applicants(filters)
                 return _wsgi_json(start_response, {"applicants": data})
+            except Exception as exc:
+                return _wsgi_json(start_response, {"error": str(exc)}, 500)
+        if path == "/api/job-titles":
+            try:
+                titles = query_job_titles()
+                return _wsgi_json(start_response, {"job_titles": titles})
             except Exception as exc:
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
         return _wsgi_json(start_response, {"error": "Not Found"}, 404)
@@ -728,6 +748,13 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 data = query_applicants(filters)
                 self._send_json({"applicants": data})
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, 500)
+            return
+
+        if parsed.path == "/api/job-titles":
+            try:
+                self._send_json({"job_titles": query_job_titles()})
             except Exception as exc:
                 self._send_json({"error": str(exc)}, 500)
             return

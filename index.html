@@ -21,16 +21,15 @@
             <input type="text" id="nameFilter" placeholder="e.g. Jane" />
           </label>
           <label>
-            Submission Date (from)
-            <input type="date" id="dateFromFilter" />
-          </label>
-          <label>
-            Submission Date (to)
-            <input type="date" id="dateToFilter" />
+            Submission Date
+            <input type="text" id="dateRangeFilter" placeholder="Select start and end date" readonly />
+            <input type="date" id="datePicker" hidden />
           </label>
           <label>
             Job Title
-            <input type="text" id="jobTitleFilter" placeholder="e.g. Deputy Sheriff" />
+            <select id="jobTitleFilter">
+              <option value="">All job titles</option>
+            </select>
           </label>
         </div>
         <div class="actions">

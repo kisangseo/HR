@@ -4,31 +4,85 @@ const state = {
 
 const els = {
   nameFilter: document.getElementById('nameFilter'),
-  dateFromFilter: document.getElementById('dateFromFilter'),
-  dateToFilter: document.getElementById('dateToFilter'),
+  dateRangeFilter: document.getElementById('dateRangeFilter'),
+  datePicker: document.getElementById('datePicker'),
   jobTitleFilter: document.getElementById('jobTitleFilter'),
   clearFiltersBtn: document.getElementById('clearFiltersBtn'),
   applicantRows: document.getElementById('applicantRows')
 };
 
+const dateRangeState = {
+  from: '',
+  to: ''
+};
+
 els.nameFilter.addEventListener('input', loadApplicants);
-els.dateFromFilter.addEventListener('change', loadApplicants);
-els.dateToFilter.addEventListener('change', loadApplicants);
-els.jobTitleFilter.addEventListener('input', loadApplicants);
+els.dateRangeFilter.addEventListener('click', openDatePicker);
+els.datePicker.addEventListener('change', handleDateSelection);
+els.jobTitleFilter.addEventListener('change', loadApplicants);
 
 els.clearFiltersBtn.addEventListener('click', () => {
   els.nameFilter.value = '';
-  els.dateFromFilter.value = '';
-  els.dateToFilter.value = '';
+  dateRangeState.from = '';
+  dateRangeState.to = '';
+  renderDateRangeFilter();
   els.jobTitleFilter.value = '';
   loadApplicants();
 });
 
+function openDatePicker() {
+  // reset so selecting the same date twice still triggers change event
+  els.datePicker.value = '';
+  if (typeof els.datePicker.showPicker === 'function') {
+    els.datePicker.showPicker();
+  } else {
+    els.datePicker.focus();
+    els.datePicker.click();
+  }
+}
+
+function handleDateSelection() {
+  const selected = (els.datePicker.value || '').trim();
+  if (!selected) return;
+
+  if (!dateRangeState.from || dateRangeState.to) {
+    dateRangeState.from = selected;
+    dateRangeState.to = '';
+    renderDateRangeFilter(true);
+    openDatePicker();
+    return;
+  }
+
+  if (selected < dateRangeState.from) {
+    dateRangeState.to = dateRangeState.from;
+    dateRangeState.from = selected;
+  } else {
+    dateRangeState.to = selected;
+  }
+  renderDateRangeFilter();
+  loadApplicants();
+}
+
+function renderDateRangeFilter(awaitingSecond = false) {
+  if (!dateRangeState.from && !dateRangeState.to) {
+    els.dateRangeFilter.value = '';
+    return;
+  }
+  if (awaitingSecond && dateRangeState.from && !dateRangeState.to) {
+    els.dateRangeFilter.value = `${formatDate(dateRangeState.from)} → pick end date`;
+    return;
+  }
+  const toValue = dateRangeState.to || dateRangeState.from;
+  els.dateRangeFilter.value = `${formatDate(dateRangeState.from)} - ${formatDate(toValue)}`;
+}
+
 async function loadApplicants() {
+  const dateFrom = dateRangeState.from;
+  const dateTo = dateRangeState.to || dateRangeState.from;
   const params = new URLSearchParams({
     name: els.nameFilter.value.trim(),
-    date_from: els.dateFromFilter.value,
-    date_to: els.dateToFilter.value,
+    date_from: dateFrom,
+    date_to: dateTo,
     job_title: els.jobTitleFilter.value.trim()
   });
 
@@ -95,4 +149,21 @@ function escapeHtml(value) {
     .replaceAll("'", '&#039;');
 }
 
-loadApplicants().catch((error) => console.error(error));
+async function loadJobTitles() {
+  const response = await fetch('/api/job-titles');
+  const payload = await response.json();
+  const titles = payload.job_titles || [];
+  const existing = new Set(
+    Array.from(els.jobTitleFilter.options).map((option) => option.value.toLowerCase())
+  );
+  for (const title of titles) {
+    const text = String(title || '').trim();
+    if (!text || existing.has(text.toLowerCase())) continue;
+    const option = document.createElement('option');
+    option.value = text;
+    option.textContent = text;
+    els.jobTitleFilter.appendChild(option);
+  }
+}
+
+Promise.all([loadJobTitles(), loadApplicants()]).catch((error) => console.error(error));

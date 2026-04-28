@@ -19,9 +19,8 @@ This version runs ingest/query directly against SQL Server so the web app and yo
 - Return ingest diagnostics (detected delimiter, detected headers, row-level warnings/skips)
 - Search applicants via `GET /api/applicants` filters:
   - `name`
-  - `date_from`
-  - `date_to`
-  - `job_title`
+  - `date_from` / `date_to` (UI uses one combined date-range picker)
+  - `job_title` (UI uses full-name dropdown)
 - Debug server build with `GET /api/version`
 - UI uses short labels for selected positions (`Court Security Officer` -> `CSO`, `Deputy Sheriff` -> `Deputy`, `Information Technology` -> `IT`)
 - Records with names containing `test` are excluded from ingest/display
