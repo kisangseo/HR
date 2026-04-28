@@ -45,6 +45,10 @@ python3 app.py
 
 Then open `http://127.0.0.1:8000` for local development.
 
+### Azure App Service note
+
+This repo now exposes a WSGI callable named `app` in `app.py`, so Oryx/Gunicorn startup (`gunicorn app:app`) works without additional startup command overrides.
+
 ## MAKE webhook setup
 
 1. In MAKE, create scenario with trigger (email or form source).

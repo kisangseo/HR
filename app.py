@@ -6,6 +6,7 @@ import json
 import os
 from collections import Counter
 from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -550,6 +551,119 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
 
     output.sort(key=lambda item: item["submittedAt"], reverse=True)
     return output
+
+
+def _http_status(code: int) -> str:
+    phrases = {
+        200: "OK",
+        400: "Bad Request",
+        401: "Unauthorized",
+        404: "Not Found",
+        405: "Method Not Allowed",
+        500: "Internal Server Error",
+    }
+    return f"{code} {phrases.get(code, 'OK')}"
+
+
+def _wsgi_json(start_response, payload: Any, code: int = 200):
+    body = json.dumps(payload).encode("utf-8")
+    start_response(
+        _http_status(code),
+        [
+            ("Content-Type", "application/json"),
+            ("Content-Length", str(len(body))),
+        ],
+    )
+    return [body]
+
+
+def _wsgi_file(start_response, path: Path, content_type: str):
+    if not path.exists():
+        return _wsgi_json(start_response, {"error": "Not Found"}, 404)
+    data = path.read_bytes()
+    start_response(
+        _http_status(200),
+        [
+            ("Content-Type", content_type),
+            ("Content-Length", str(len(data))),
+        ],
+    )
+    return [data]
+
+
+def app(environ, start_response):
+    method = (environ.get("REQUEST_METHOD") or "GET").upper()
+    path = environ.get("PATH_INFO") or "/"
+    query = parse_qs(environ.get("QUERY_STRING") or "")
+
+    content_length_raw = environ.get("CONTENT_LENGTH", "0")
+    try:
+        content_length = int(content_length_raw or "0")
+    except ValueError:
+        content_length = 0
+    body_text = ""
+    if content_length > 0:
+        body_text = (environ.get("wsgi.input") or BytesIO()).read(content_length).decode("utf-8")
+
+    if method == "GET":
+        if path == "/":
+            return _wsgi_file(start_response, INDEX_HTML, "text/html; charset=utf-8")
+        if path == "/app.js":
+            return _wsgi_file(start_response, STATIC_JS, "text/javascript; charset=utf-8")
+        if path == "/styles.css":
+            return _wsgi_file(start_response, STATIC_CSS, "text/css; charset=utf-8")
+        if path == "/api/version":
+            return _wsgi_json(start_response, {"app_version": APP_VERSION, "db_backend": "sqlserver"})
+        if path == "/api/applicants":
+            filters = {
+                "name": (query.get("name") or [""])[0],
+                "job_title": (query.get("job_title") or [""])[0],
+                "date_from": (query.get("date_from") or [""])[0],
+                "date_to": (query.get("date_to") or [""])[0],
+            }
+            try:
+                data = query_applicants(filters)
+                return _wsgi_json(start_response, {"applicants": data})
+            except Exception as exc:
+                return _wsgi_json(start_response, {"error": str(exc)}, 500)
+        return _wsgi_json(start_response, {"error": "Not Found"}, 404)
+
+    if method == "POST":
+        if path == "/api/ingest-interest-form":
+            if not body_text.strip():
+                return _wsgi_json(start_response, {"error": "JSON payload is empty."}, 400)
+
+            provided_token = environ.get("HTTP_X_WEBHOOK_TOKEN", "")
+            if MAKE_WEBHOOK_TOKEN and provided_token != MAKE_WEBHOOK_TOKEN:
+                return _wsgi_json(start_response, {"error": "Unauthorized webhook token."}, 401)
+
+            try:
+                payload = parse_json_body(body_text)
+                mapped = build_record_from_make(payload)
+                if not mapped:
+                    return _wsgi_json(start_response, {"error": "Could not parse applicant name from payload."}, 400)
+                if contains_test_name(mapped["full_name"]):
+                    return _wsgi_json(start_response, {"inserted": 0, "skipped": 1, "reason": "Name contains 'test'."})
+                with get_sql_connection() as conn:
+                    cursor = conn.cursor()
+                    insert_mapped_record(cursor, mapped)
+                    conn.commit()
+                return _wsgi_json(start_response, {"inserted": 1, "source": "make_webhook"})
+            except Exception as exc:
+                return _wsgi_json(start_response, {"error": str(exc)}, 500)
+
+        if path == "/api/ingest-csv":
+            if not body_text.strip():
+                return _wsgi_json(start_response, {"error": "CSV payload is empty."}, 400)
+            try:
+                result = ingest_csv(body_text)
+                return _wsgi_json(start_response, result)
+            except Exception as exc:
+                return _wsgi_json(start_response, {"error": str(exc)}, 500)
+
+        return _wsgi_json(start_response, {"error": "Not Found"}, 404)
+
+    return _wsgi_json(start_response, {"error": "Method Not Allowed"}, 405)
 
 
 class Handler(BaseHTTPRequestHandler):
