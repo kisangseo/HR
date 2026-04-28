@@ -11,13 +11,9 @@ jobs:
     steps:
       - name: Call ingest endpoint
         env:
-          INGEST_ENDPOINT_URL: ${{ secrets.HR_INGEST_ENDPOINT_URL || vars.HR_INGEST_ENDPOINT_URL }}
           RUN_TOKEN: ${{ secrets.HR_RUN_INGEST_TOKEN || vars.HR_RUN_INGEST_TOKEN }}
         run: |
-          if [ -z "${INGEST_ENDPOINT_URL}" ]; then
-            echo "::error title=Missing endpoint URL::Set HR_INGEST_ENDPOINT_URL in GitHub Secrets or Variables."
-            exit 1
-          fi
+          INGEST_ENDPOINT_URL="https://jobapplications-badhh8h5afdpcqe8.centralus-01.azurewebsites.net/run-ingest"
 
           if [ -n "${RUN_TOKEN}" ]; then
             curl --fail --show-error --silent \

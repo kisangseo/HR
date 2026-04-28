@@ -87,8 +87,8 @@ This repo includes `.github/workflows/email_ingest_job.yml` that just calls a ho
 run: curl https://YOUR_APP/run-ingest
 ```
 
-Required GitHub secret/variable:
-- `HR_INGEST_ENDPOINT_URL` (example: `https://<your-app>.azurewebsites.net/run-ingest`)
+Endpoint is currently hardcoded in workflow to:
+- `https://jobapplications-badhh8h5afdpcqe8.centralus-01.azurewebsites.net/run-ingest`
 
 Optional (recommended):
 - `HR_RUN_INGEST_TOKEN` (passed as `X-Run-Token` header)
