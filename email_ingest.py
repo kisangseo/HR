@@ -17,6 +17,19 @@ GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 GRAPH_SCOPE = ["https://graph.microsoft.com/.default"]
 PROCESSED_FOLDER_NAME = "processed"
 APPLICATIONS_TABLE = "dbo.job_applications"
+POSITION_CANONICAL = {
+    "court security officer": "Court Security Officer",
+    "deputy sheriff": "Deputy Sheriff",
+    "radio dispatcher": "Radio Dispatcher",
+    "information technology": "Information Technology",
+    "communications": "Communications",
+    "social worker": "Social Worker",
+    "other": "Other",
+}
+POSITION_SPLIT_PATTERN = re.compile(
+    r"(court security officer|deputy sheriff|radio dispatcher|information technology|communications|social worker|other)",
+    flags=re.IGNORECASE,
+)
 
 MAILBOX_EMAIL = (os.getenv("MAILBOX_EMAIL") or "").strip()
 TARGET_SENDER = (os.getenv("JOB_APP_SENDER", "noreply@baltimorecitysheriff.gov") or "").strip().lower()
@@ -223,18 +236,20 @@ def parse_job_application_email(body_html: str) -> ParsedApplication:
     if not other_raw:
         other_raw = capture_between("other interested positions", preserve_newlines=True)
 
-    other_parts = [
-        part.strip()
-        for chunk in re.split(r"\n+", other_raw)
-        for part in chunk.split(",")
-        if part.strip()
-    ]
+    primary_candidates = split_positions_text(primary_position)
+    primary_position_clean = primary_candidates[0] if primary_candidates else strip_sent_from_suffix(primary_position)
+
+    other_parts: list[str] = []
+    for chunk in re.split(r"\n+", other_raw):
+        other_parts.extend(split_positions_text(chunk))
+    other_parts = [part for part in other_parts if part and part.lower() != primary_position_clean.lower()]
+    other_parts = list(dict.fromkeys(other_parts))
 
     return ParsedApplication(
         name=name,
         email=email_value,
         phone=phone,
-        primary_position=primary_position,
+        primary_position=primary_position_clean,
         other_positions=other_parts,
         raw_text=text,
     )
@@ -427,3 +442,27 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    def strip_sent_from_suffix(value: str) -> str:
+        return re.sub(
+            r"(?is)\s*sent from the baltimore city sheriff'?s office.*$",
+            "",
+            (value or "").strip(),
+        ).strip(" ,;-")
+
+    def split_positions_text(value: str) -> list[str]:
+        text_value = strip_sent_from_suffix(value)
+        if not text_value:
+            return []
+        if "," in text_value or ";" in text_value or "|" in text_value:
+            base_parts = [part.strip() for part in re.split(r"[;,|]", text_value) if part.strip()]
+        else:
+            matches = POSITION_SPLIT_PATTERN.findall(text_value)
+            base_parts = matches if len(matches) > 1 else [text_value]
+
+        normalized: list[str] = []
+        for part in base_parts:
+            key = " ".join((part or "").strip().lower().split())
+            if not key:
+                continue
+            normalized.append(POSITION_CANONICAL.get(key, part.strip()))
+        return normalized

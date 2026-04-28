@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import os
+import re
 from collections import Counter
 from datetime import datetime, timezone
 from io import BytesIO
@@ -45,6 +46,20 @@ ALIASES = {
     ],
 }
 
+POSITION_CANONICAL = {
+    "court security officer": "Court Security Officer",
+    "deputy sheriff": "Deputy Sheriff",
+    "radio dispatcher": "Radio Dispatcher",
+    "information technology": "Information Technology",
+    "communications": "Communications",
+    "social worker": "Social Worker",
+    "other": "Other",
+}
+POSITION_SPLIT_PATTERN = re.compile(
+    r"(court security officer|deputy sheriff|radio dispatcher|information technology|communications|social worker|other)",
+    flags=re.IGNORECASE,
+)
+
 def get_sql_connection():
     if pyodbc is None:
         raise RuntimeError(
@@ -58,6 +73,33 @@ def get_sql_connection():
 def normalize_key(value: str) -> str:
     normalized = " ".join(value.strip().lower().split())
     return normalized.lstrip("\ufeff")
+
+
+def strip_sent_from_suffix(value: str) -> str:
+    return re.sub(
+        r"(?is)\s*sent from the baltimore city sheriff'?s office.*$",
+        "",
+        (value or "").strip(),
+    ).strip(" ,;-")
+
+
+def split_positions_text(value: str) -> list[str]:
+    text = strip_sent_from_suffix(value)
+    if not text:
+        return []
+    if "," in text or ";" in text or "|" in text:
+        base_parts = split_multi_value(text)
+    else:
+        matches = POSITION_SPLIT_PATTERN.findall(text)
+        base_parts = matches if len(matches) > 1 else [text]
+
+    normalized: list[str] = []
+    for part in base_parts:
+        key = " ".join((part or "").strip().lower().split())
+        if not key:
+            continue
+        normalized.append(POSITION_CANONICAL.get(key, part.strip()))
+    return normalized
 
 
 def split_multi_value(value: str) -> list[str]:
@@ -505,6 +547,15 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
             submitted_text = submitted_value.date().isoformat()
         else:
             submitted_text = str(submitted_value)[:10]
+        raw_other_positions = json.loads(row[6] or "[]")
+        if not isinstance(raw_other_positions, list):
+            raw_other_positions = []
+        primary_parts = split_positions_text(row[5] or "")
+        primary_clean = primary_parts[0] if primary_parts else (strip_sent_from_suffix(str(row[5] or "")) or "—")
+        other_clean: list[str] = []
+        for value in raw_other_positions:
+            other_clean.extend(split_positions_text(str(value)))
+        other_clean = [value for value in other_clean if value and value.lower() != primary_clean.lower()]
         raw_output.append(
             {
                 "id": row[0],
@@ -512,8 +563,8 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
                 "name": row[2],
                 "email": row[3],
                 "phone": row[4],
-                "primaryPosition": row[5],
-                "otherPositions": json.loads(row[6] or "[]"),
+                "primaryPosition": primary_clean,
+                "otherPositions": list(dict.fromkeys(other_clean)),
                 "status": row[7],
                 "source": row[8],
             }
@@ -568,7 +619,12 @@ def query_job_titles() -> list[str]:
     with get_sql_connection() as conn:
         cursor = conn.cursor()
         rows = cursor.execute(sql).fetchall()
-    return [str(row[0]).strip() for row in rows if str(row[0]).strip()]
+    cleaned: list[str] = []
+    for row in rows:
+        for value in split_positions_text(str(row[0] or "")):
+            if value:
+                cleaned.append(value)
+    return sorted(set(cleaned), key=lambda item: item.lower())
 
 
 def run_email_ingest(scan_limit: int, source_folder: str = "all") -> dict[str, Any]:

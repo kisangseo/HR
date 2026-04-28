@@ -122,6 +122,7 @@ function shortenPosition(value) {
   const key = text.toLowerCase();
   if (key === 'court security officer') return 'CSO';
   if (key === 'deputy sheriff') return 'Deputy';
+  if (key === 'radio dispatcher') return 'Radio';
   if (key === 'information technology') return 'IT';
   return text || '—';
 }

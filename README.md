@@ -72,6 +72,7 @@ Behavior:
 - Processes messages where sender equals `JOB_APP_SENDER` and subject contains `JOB_APP_SUBJECT_CONTAINS` (case-insensitive).
 - Parses fixed labels: Name, Email, Phone Number, Primary Position You Are Applying For, Other Interested Positions.
 - Stores `other_positions` as JSON array split by comma/newline.
+- Strips footer text like `Sent from The Baltimore City Sheriff's Office` from parsed position values.
 - Inserts every matching email (no dedupe), with source defaulting to `email`.
 - Moves every matching/processed job-application email into Inbox child folder `processed`.
 
