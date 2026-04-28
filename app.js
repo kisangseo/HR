@@ -3,72 +3,86 @@ const state = {
 };
 
 const els = {
-  csvFile: document.getElementById('csvFile'),
-  loadCsvBtn: document.getElementById('loadCsvBtn'),
-  ingestStatus: document.getElementById('ingestStatus'),
-  ingestDetails: document.getElementById('ingestDetails'),
   nameFilter: document.getElementById('nameFilter'),
-  dateFromFilter: document.getElementById('dateFromFilter'),
-  dateToFilter: document.getElementById('dateToFilter'),
+  dateRangeFilter: document.getElementById('dateRangeFilter'),
+  datePicker: document.getElementById('datePicker'),
   jobTitleFilter: document.getElementById('jobTitleFilter'),
   clearFiltersBtn: document.getElementById('clearFiltersBtn'),
   applicantRows: document.getElementById('applicantRows')
 };
 
-els.loadCsvBtn.addEventListener('click', async () => {
-  const file = els.csvFile.files?.[0];
-  if (!file) {
-    setStatus('Choose a CSV file first.', true);
-    return;
-  }
-
-  try {
-    const text = await file.text();
-    const response = await fetch('/api/ingest-csv', {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
-      body: text
-    });
-
-    const result = await response.json();
-    if (!response.ok) {
-      throw new Error(result.error || 'Ingest failed.');
-    }
-
-    await loadApplicants();
-    const parsedRows = Number.isFinite(result.parsed_rows)
-      ? result.parsed_rows
-      : (result.inserted || 0) + (result.skipped || 0);
-
-    setStatus(
-      `Ingest complete. Inserted ${result.inserted || 0}, skipped ${result.skipped || 0}, parsed ${parsedRows}.`,
-      false
-    );
-    renderIngestDetails(result);
-  } catch (error) {
-    setStatus(error.message, true);
-    els.ingestDetails.textContent = '';
-  }
-});
+const dateRangeState = {
+  from: '',
+  to: ''
+};
 
 els.nameFilter.addEventListener('input', loadApplicants);
-els.dateFromFilter.addEventListener('change', loadApplicants);
-els.dateToFilter.addEventListener('change', loadApplicants);
-els.jobTitleFilter.addEventListener('input', loadApplicants);
+els.dateRangeFilter.addEventListener('click', openDatePicker);
+els.datePicker.addEventListener('change', handleDateSelection);
+els.jobTitleFilter.addEventListener('change', loadApplicants);
 
 els.clearFiltersBtn.addEventListener('click', () => {
   els.nameFilter.value = '';
-  els.dateFromFilter.value = '';
-  els.dateToFilter.value = '';
+  dateRangeState.from = '';
+  dateRangeState.to = '';
+  renderDateRangeFilter();
   els.jobTitleFilter.value = '';
   loadApplicants();
 });
 
+function openDatePicker() {
+  // reset so selecting the same date twice still triggers change event
+  els.datePicker.value = '';
+  if (typeof els.datePicker.showPicker === 'function') {
+    els.datePicker.showPicker();
+  } else {
+    els.datePicker.focus();
+    els.datePicker.click();
+  }
+}
+
+function handleDateSelection() {
+  const selected = (els.datePicker.value || '').trim();
+  if (!selected) return;
+
+  if (!dateRangeState.from || dateRangeState.to) {
+    dateRangeState.from = selected;
+    dateRangeState.to = '';
+    renderDateRangeFilter(true);
+    openDatePicker();
+    return;
+  }
+
+  if (selected < dateRangeState.from) {
+    dateRangeState.to = dateRangeState.from;
+    dateRangeState.from = selected;
+  } else {
+    dateRangeState.to = selected;
+  }
+  renderDateRangeFilter();
+  loadApplicants();
+}
+
+function renderDateRangeFilter(awaitingSecond = false) {
+  if (!dateRangeState.from && !dateRangeState.to) {
+    els.dateRangeFilter.value = '';
+    return;
+  }
+  if (awaitingSecond && dateRangeState.from && !dateRangeState.to) {
+    els.dateRangeFilter.value = `${formatDate(dateRangeState.from)} → pick end date`;
+    return;
+  }
+  const toValue = dateRangeState.to || dateRangeState.from;
+  els.dateRangeFilter.value = `${formatDate(dateRangeState.from)} - ${formatDate(toValue)}`;
+}
+
 async function loadApplicants() {
+  const dateFrom = dateRangeState.from;
+  const dateTo = dateRangeState.to || dateRangeState.from;
   const params = new URLSearchParams({
     name: els.nameFilter.value.trim(),
-    date_from: els.dateFromFilter.value,
-    date_to: els.dateToFilter.value,
+    date_from: dateFrom,
+    date_to: dateTo,
     job_title: els.jobTitleFilter.value.trim()
   });
 
@@ -135,53 +149,21 @@ function escapeHtml(value) {
     .replaceAll("'", '&#039;');
 }
 
-function setStatus(message, isError) {
-  els.ingestStatus.textContent = message;
-  els.ingestStatus.classList.toggle('error', isError);
-  els.ingestStatus.classList.toggle('ok', !isError);
+async function loadJobTitles() {
+  const response = await fetch('/api/job-titles');
+  const payload = await response.json();
+  const titles = payload.job_titles || [];
+  const existing = new Set(
+    Array.from(els.jobTitleFilter.options).map((option) => option.value.toLowerCase())
+  );
+  for (const title of titles) {
+    const text = String(title || '').trim();
+    if (!text || existing.has(text.toLowerCase())) continue;
+    const option = document.createElement('option');
+    option.value = text;
+    option.textContent = text;
+    els.jobTitleFilter.appendChild(option);
+  }
 }
 
-function renderIngestDetails(result) {
-  const lines = [];
-  if (!('parsed_rows' in result) || !('issues' in result) || !('detected_headers' in result)) {
-    lines.push(
-      'Warning: API response is missing diagnostics fields. You may be running an older server process.'
-    );
-    lines.push('Please stop and restart the app with: python3 app.py');
-    lines.push('');
-  }
-
-  lines.push(`App version: ${result.app_version || 'unknown'}`);
-  lines.push(`Detected delimiter: ${result.detected_delimiter || 'unknown'}`);
-  lines.push(`Detected headers (${(result.detected_headers || []).length} shown):`);
-  lines.push((result.detected_headers || []).join(', ') || '(none)');
-
-  const issues = result.issues || [];
-  const summary = result.issue_summary || {};
-  const summaryEntries = Object.entries(summary);
-  if (summaryEntries.length) {
-    lines.push('\nTop issue summary:');
-    for (const [message, count] of summaryEntries) {
-      lines.push(`- ${count}x ${message}`);
-    }
-  }
-
-  if (!issues.length) {
-    lines.push('\\nNo ingest issues reported.');
-  } else {
-    const totalIssues = result.issue_count ?? issues.length;
-    const maxToShow = 40;
-    lines.push(`\\nIssues / warnings (showing ${Math.min(issues.length, maxToShow)} of ${totalIssues}):`);
-    for (const issue of issues.slice(0, maxToShow)) {
-      const details = (issue.details || []).join(' | ');
-      lines.push(`- row ${issue.row}: ${issue.reason}${details ? ` -> ${details}` : ''}`);
-    }
-    if (totalIssues > maxToShow) {
-      lines.push(`... ${totalIssues - maxToShow} more issue rows not shown.`);
-    }
-  }
-
-  els.ingestDetails.textContent = lines.join('\\n');
-}
-
-loadApplicants().catch((error) => setStatus(error.message, true));
+Promise.all([loadJobTitles(), loadApplicants()]).catch((error) => console.error(error));
