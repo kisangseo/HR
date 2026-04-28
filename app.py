@@ -650,8 +650,10 @@ def app(environ, start_response):
                 source_folder = "inbox"
             try:
                 result = run_email_ingest(scan_limit=scan_limit, source_folder=source_folder)
+                logging.info("/run-ingest completed source_folder=%s scan_limit=%s result=%s", source_folder, scan_limit, result)
                 return _wsgi_json(start_response, {"ok": True, **result})
             except Exception as exc:
+                logging.exception("/run-ingest failed source_folder=%s scan_limit=%s", source_folder, scan_limit)
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
         if path == "/api/applicants":
             filters = {
@@ -801,8 +803,10 @@ class Handler(BaseHTTPRequestHandler):
                 source_folder = "inbox"
             try:
                 result = run_email_ingest(scan_limit=scan_limit, source_folder=source_folder)
+                logging.info("/run-ingest completed source_folder=%s scan_limit=%s result=%s", source_folder, scan_limit, result)
                 self._send_json({"ok": True, **result})
             except Exception as exc:
+                logging.exception("/run-ingest failed source_folder=%s scan_limit=%s", source_folder, scan_limit)
                 self._send_json({"error": str(exc)}, 500)
             return
 

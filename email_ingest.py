@@ -16,6 +16,7 @@ import requests
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 GRAPH_SCOPE = ["https://graph.microsoft.com/.default"]
 PROCESSED_FOLDER_NAME = "processed"
+APPLICATIONS_TABLE = "dbo.job_applications"
 
 MAILBOX_EMAIL = (os.getenv("MAILBOX_EMAIL") or "").strip()
 TARGET_SENDER = (os.getenv("JOB_APP_SENDER", "noreply@baltimorecitysheriff.gov") or "").strip().lower()
@@ -254,6 +255,16 @@ def insert_application(cursor: pyodbc.Cursor, parsed: ParsedApplication, message
         },
     }
 
+    logging.info(
+        "DB insert target=%s message_id=%s name=%s email=%s phone=%s primary_position=%s",
+        APPLICATIONS_TABLE,
+        message.get("id") or "",
+        parsed_name,
+        (parsed.get("email") or "").strip(),
+        (parsed.get("phone") or "").strip(),
+        (parsed.get("primary_position") or "").strip(),
+    )
+
     cursor.execute(
         """
         INSERT INTO dbo.job_applications (
@@ -304,6 +315,7 @@ def run_ingest(scan_limit: int, source_folder: str = "inbox") -> dict[str, int]:
         max(scan_limit, 1),
     )
     logging.info("Scanning source folder: %s", source_folder_normalized)
+    logging.info("DB table target: %s", APPLICATIONS_TABLE)
 
     messages = fetch_folder_messages(token, MAILBOX_EMAIL, source_folder_id, max(scan_limit, 1))
     logging.info("Fetched %d inbox messages", len(messages))
@@ -335,8 +347,12 @@ def run_ingest(scan_limit: int, source_folder: str = "inbox") -> dict[str, int]:
             body_html = ((message.get("body") or {}).get("content") or "")
             parsed = parse_job_application_email(body_html)
 
-            insert_application(cursor, parsed, message)
-            inserted += 1
+            try:
+                insert_application(cursor, parsed, message)
+                inserted += 1
+            except Exception:
+                logging.exception("Insert failed for message_id=%s", message_id)
+                continue
 
             if source_folder_normalized == "inbox":
                 move_email_to_processed_folder(token, MAILBOX_EMAIL, message_id, processed_folder_id)
