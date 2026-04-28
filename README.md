@@ -95,13 +95,12 @@ run: curl https://YOUR_APP/run-ingest
 Endpoint is currently hardcoded in workflow to:
 - `https://jobapplications-badhh8h5afdpcqe8.centralus-01.azurewebsites.net/run-ingest`
 
-Optional (recommended):
-- `HR_RUN_INGEST_TOKEN` (passed as `X-Run-Token` header)
+Optional (if you later decide to protect `/run-ingest`):
+- `HR_RUN_INGEST_TOKEN`
 
 Then run:
 1. GitHub → **Actions** → **Email ingest trigger**.
 2. Click **Run workflow**.
-3. If it fails, open the workflow log and review the printed HTTP status + response body from `/run-ingest`.
 
 ### Endpoint security
 
