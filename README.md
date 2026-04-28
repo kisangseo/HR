@@ -101,6 +101,7 @@ Optional (recommended):
 Then run:
 1. GitHub → **Actions** → **Email ingest trigger**.
 2. Click **Run workflow**.
+3. If it fails, open the workflow log and review the printed HTTP status + response body from `/run-ingest`.
 
 ### Endpoint security
 

@@ -14,11 +14,18 @@ jobs:
           RUN_TOKEN: ${{ secrets.HR_RUN_INGEST_TOKEN || vars.HR_RUN_INGEST_TOKEN }}
         run: |
           INGEST_ENDPOINT_URL="https://jobapplications-badhh8h5afdpcqe8.centralus-01.azurewebsites.net/run-ingest"
-
+          CURL_ARGS=(--silent --show-error --location --output response_body.txt --write-out "%{http_code}")
           if [ -n "${RUN_TOKEN}" ]; then
-            curl --fail --show-error --silent \
-              -H "X-Run-Token: ${RUN_TOKEN}" \
-              "${INGEST_ENDPOINT_URL}"
+            HTTP_CODE=$(curl "${CURL_ARGS[@]}" -H "X-Run-Token: ${RUN_TOKEN}" "${INGEST_ENDPOINT_URL}")
           else
-            curl --fail --show-error --silent "${INGEST_ENDPOINT_URL}"
+            HTTP_CODE=$(curl "${CURL_ARGS[@]}" "${INGEST_ENDPOINT_URL}")
+          fi
+
+          echo "HTTP status: ${HTTP_CODE}"
+          echo "Response body:"
+          cat response_body.txt || true
+
+          if [ "${HTTP_CODE}" -ge 400 ]; then
+            echo "::error title=Ingest endpoint failed::HTTP ${HTTP_CODE}"
+            exit 1
           fi
