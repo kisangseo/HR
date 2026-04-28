@@ -19,6 +19,7 @@ PROCESSED_FOLDER_NAME = "processed"
 
 MAILBOX_EMAIL = (os.getenv("MAILBOX_EMAIL") or "").strip()
 TARGET_SENDER = (os.getenv("JOB_APP_SENDER", "noreply@baltimorecitysheriff.gov") or "").strip().lower()
+SENDER_MATCH_MODE = (os.getenv("JOB_APP_SENDER_MATCH_MODE", "exact") or "exact").strip().lower()
 SUBJECT_CONTAINS = (os.getenv("JOB_APP_SUBJECT_CONTAINS", "Job Application") or "").strip().lower()
 INBOX_SCAN_LIMIT = int(os.getenv("INBOX_SCAN_LIMIT", "500"))
 SQL_CONNECTION_STRING = (os.getenv("HR_SQL_CONNECTION_STRING") or "").strip()
@@ -263,7 +264,11 @@ def insert_application(cursor: pyodbc.Cursor, parsed: ParsedApplication, message
 def is_target_job_application(message: dict[str, Any]) -> bool:
     sender_address = extract_sender_address(message)
     subject = (message.get("subject") or "").strip().lower()
-    return sender_address == TARGET_SENDER and SUBJECT_CONTAINS in subject
+    if SENDER_MATCH_MODE == "contains":
+        sender_matches = TARGET_SENDER in sender_address
+    else:
+        sender_matches = sender_address == TARGET_SENDER
+    return sender_matches and SUBJECT_CONTAINS in subject
 
 
 def main() -> None:
@@ -277,8 +282,25 @@ def main() -> None:
     token = get_access_token()
     processed_folder_id = get_processed_folder_id(token, MAILBOX_EMAIL)
 
+    logging.info(
+        "Email ingest config: mailbox=%s target_sender=%s sender_match_mode=%s subject_contains=%s scan_limit=%s",
+        MAILBOX_EMAIL,
+        TARGET_SENDER,
+        SENDER_MATCH_MODE,
+        SUBJECT_CONTAINS,
+        max(args.scan_limit, 1),
+    )
+
     messages = fetch_inbox_messages(token, MAILBOX_EMAIL, max(args.scan_limit, 1))
     logging.info("Fetched %d inbox messages", len(messages))
+
+    if messages:
+        sender_counts: dict[str, int] = {}
+        for message in messages:
+            sender = extract_sender_address(message)
+            sender_counts[sender] = sender_counts.get(sender, 0) + 1
+        top_senders = sorted(sender_counts.items(), key=lambda item: item[1], reverse=True)[:5]
+        logging.info("Top senders in scanned inbox messages: %s", top_senders)
 
     inserted = 0
     moved = 0

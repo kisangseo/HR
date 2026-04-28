@@ -57,6 +57,7 @@ export HR_SQL_CONNECTION_STRING="Driver={ODBC Driver 18 for SQL Server};..."
 
 # optional overrides
 export JOB_APP_SENDER=noreply@baltimorecitysheriff.gov
+export JOB_APP_SENDER_MATCH_MODE=exact  # exact | contains
 export JOB_APP_SUBJECT_CONTAINS="Job Application"
 export INBOX_SCAN_LIMIT=500
 # defaults to csv so existing source='csv' queries continue to work
@@ -72,6 +73,11 @@ Behavior:
 - Stores `other_positions` as JSON array split by comma/newline.
 - Inserts every matching email (no dedupe), with source defaulting to `csv`.
 - Moves every matching/processed job-application email into Inbox child folder `processed`.
+
+Troubleshooting:
+- The script reads environment variables from the shell/session where `python3 email_ingest.py` runs.
+- Azure App Service environment variables are only used by code running inside App Service (not your local terminal run).
+- Startup logs now print mailbox/sender config and top senders scanned so you can verify filtering.
 
 ### Azure App Service note
 
