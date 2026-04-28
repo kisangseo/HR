@@ -28,6 +28,7 @@ This version runs ingest/query directly against SQL Server so the web app and yo
 - Records with names containing `test` are excluded from ingest/display
 - Same-name applicants are merged in API response and positions are unioned for display
 - Optional MAKE webhook endpoint (`POST /api/ingest-interest-form`) to ingest parsed interest forms directly
+- Optional Microsoft Graph email ingest script (`email_ingest.py`) for inbox-based job applications
 
 ## Run
 
@@ -44,6 +45,33 @@ python3 app.py
 ```
 
 Then open `http://127.0.0.1:8000` for local development.
+
+## Email ingest (Microsoft Graph)
+
+Use this when job applications arrive by email and should be inserted into `job_applications`.
+
+```bash
+export CLIENT_ID=...
+export CLIENT_SECRET=...
+export TENANT_ID=...
+export MAILBOX_EMAIL=shared-mailbox@yourdomain.org
+export HR_SQL_CONNECTION_STRING="Driver={ODBC Driver 18 for SQL Server};..."
+
+# optional overrides
+export JOB_APP_SENDER=noreply@baltimorecitysheriff.gov
+export JOB_APP_SUBJECT_CONTAINS="Job Application"
+export INBOX_SCAN_LIMIT=500
+
+python3 email_ingest.py
+```
+
+Behavior:
+- Scans the main Inbox.
+- Processes messages where sender equals `JOB_APP_SENDER` and subject contains `JOB_APP_SUBJECT_CONTAINS` (case-insensitive).
+- Parses fixed labels: Name, Email, Phone Number, Primary Position You Are Applying For, Other Interested Positions.
+- Stores `other_positions` as JSON array split by comma/newline.
+- Inserts every matching email (no dedupe).
+- Moves every matching/processed job-application email into Inbox child folder `processed`.
 
 ### Azure App Service note
 
