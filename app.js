@@ -94,7 +94,7 @@ async function loadApplicants() {
 
 function renderTable(applicants) {
   if (!applicants.length) {
-    els.applicantRows.innerHTML = '<tr><td colspan="7">No applicants found.</td></tr>';
+    els.applicantRows.innerHTML = '<tr><td colspan="8">No applicants found.</td></tr>';
     return;
   }
 
@@ -115,11 +115,18 @@ function renderTable(applicants) {
         <td>${escapeHtml(applicant.status || '—')}</td>
         <td>${escapeHtml(applicant.email || '—')}</td>
         <td>${escapeHtml(applicant.phone || '—')}</td>
+        <td>${renderPdfLink(applicant.cognitoPdfUrl)}</td>
       </tr>`;
     })
     .join('');
 }
 
+
+function renderPdfLink(url) {
+  const text = String(url || '').trim();
+  if (!text) return '—';
+  return `<a href="${escapeHtml(text)}" target="_blank" rel="noopener noreferrer">View PDF</a>`;
+}
 function cleanDisplayPosition(value) {
   const text = String(value || '').trim();
   if (!text) return '';
