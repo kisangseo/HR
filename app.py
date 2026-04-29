@@ -498,7 +498,7 @@ def upsert_cognito_record(cursor, mapped: dict[str, Any], payload: dict[str, Any
             ),
         )
     else:
-        cursor.execute(
+        inserted_row = cursor.execute(
             """
             INSERT INTO dbo.job_applications (
               submitted_at, first_name, last_name, middle_name, email, phone,
@@ -512,7 +512,9 @@ def upsert_cognito_record(cursor, mapped: dict[str, Any], payload: dict[str, Any
               felony_conviction, domestic_violence_misdemeanor, protective_order, currently_under_charges, unlawful_drug_use_last_3y, prior_police_service,
               resume_file_name, resume_file_url, resume_content_type, signature_png_url, signature_svg_url, signature_typed_text,
               cognito_pdf_url, cognito_pdf_generated_at, last_cognito_sync_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'cognito', ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?,
+            )
+            OUTPUT INSERTED.id
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'cognito', ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?,
                       TRY_CAST(? AS DATETIME2), TRY_CAST(? AS DATETIME2), TRY_CAST(? AS DATETIME2),
                       ?, ?, ?, ?, ?, ?, ?, ?,
                       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -531,7 +533,7 @@ def upsert_cognito_record(cursor, mapped: dict[str, Any], payload: dict[str, Any
                 cognito_pdf_url, cognito_pdf_url
             ),
         )
-        app_id = int(cursor.execute("SELECT CAST(SCOPE_IDENTITY() AS INT)").fetchone()[0])
+        app_id = int(inserted_row.fetchone()[0])
 
     cursor.execute(
         """
