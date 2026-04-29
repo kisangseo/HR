@@ -225,6 +225,14 @@ def clean_text(value: Any) -> str | None:
     return text or None
 
 
+def normalize_status_label(value: Any) -> str:
+    text = str(value or '').strip()
+    lowered = text.lower()
+    if lowered in {'interest_submitted', 'interest form submitted'}:
+        return 'Interest Submitted'
+    return text
+
+
 def extract_first_email(raw_text: str) -> str:
     text = (raw_text or "").strip()
     if not text:
@@ -332,7 +340,7 @@ def map_row(raw_row: dict[str, str]) -> tuple[dict[str, Any] | None, list[str]]:
         "phone": phone,
         "primary_position": primary_position,
         "other_positions": other_positions,
-        "status": "Interest Form Submitted",
+        "status": "Interest Submitted",
         "source": "csv",
         "raw_payload": raw_row,
     }, errors
@@ -768,8 +776,10 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
         params.append(f"%{filters['job_title'].lower()}%")
 
     if filters.get("status"):
-        sql += " AND LOWER(status) LIKE ?"
-        params.append(f"%{filters['status'].lower()}%")
+        sql += " AND (LOWER(status) LIKE ? OR LOWER(REPLACE(status, '_', ' ')) LIKE ?)"
+        status_value = filters['status'].lower()
+        params.append(f"%{status_value}%")
+        params.append(f"%{status_value}%")
 
     if filters.get("date_from"):
         sql += " AND CAST(submitted_at AS date) >= ?"
@@ -810,7 +820,7 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
                 "phone": normalize_phone(str(row[4] or "")),
                 "primaryPosition": primary_clean,
                 "otherPositions": list(dict.fromkeys(other_clean)),
-                "status": row[7],
+                "status": normalize_status_label(row[7]),
                 "source": row[8],
                 "cognitoPdfUrl": row[9],
                 "cognitoDocumentLink": row[10],
@@ -889,7 +899,18 @@ def query_statuses() -> list[str]:
     with get_sql_connection() as conn:
         cursor = conn.cursor()
         rows = cursor.execute(sql).fetchall()
-    return [str(row[0]).strip() for row in rows if str(row[0]).strip()]
+    seen = set()
+    output: list[str] = []
+    for row in rows:
+        normalized = normalize_status_label(row[0])
+        if not normalized:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(normalized)
+    return output
 
 def run_email_ingest(scan_limit: int, source_folder: str = "all") -> dict[str, Any]:
     from email_ingest import run_ingest
