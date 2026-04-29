@@ -115,7 +115,7 @@ function renderTable(applicants) {
         <td>${escapeHtml(applicant.status || '—')}</td>
         <td>${escapeHtml(applicant.email || '—')}</td>
         <td>${escapeHtml(applicant.phone || '—')}</td>
-        <td>${renderPdfLink(applicant.cognitoPdfUrl)}</td>
+        <td>${renderPdfLink(applicant.cognitoPdfUrl || applicant.cognitoDocumentLink)}</td>
       </tr>`;
     })
     .join('');
@@ -125,7 +125,7 @@ function renderTable(applicants) {
 function renderPdfLink(url) {
   const text = String(url || '').trim();
   if (!text) return '—';
-  return `<a href="${escapeHtml(text)}" target="_blank" rel="noopener noreferrer">View PDF</a>`;
+  return `<a href="${escapeHtml(text)}" target="_blank" rel="noopener noreferrer">Download PDF</a>`;
 }
 function cleanDisplayPosition(value) {
   const text = String(value || '').trim();

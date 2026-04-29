@@ -750,7 +750,7 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
     sql = """
         SELECT
             id, submitted_at, full_name, email, phone,
-            primary_position, other_positions, status, source, cognito_pdf_url
+            primary_position, other_positions, status, source, cognito_pdf_url, cognito_document_link
         FROM dbo.job_applications
         WHERE 1 = 1
     """
@@ -807,6 +807,7 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
                 "status": row[7],
                 "source": row[8],
                 "cognitoPdfUrl": row[9],
+                "cognitoDocumentLink": row[10],
             }
         )
     # Smart presentation layer:
