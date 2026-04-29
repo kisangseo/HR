@@ -180,6 +180,8 @@ def strip_sent_from_suffix(value: str) -> str:
 
 def split_positions_text(value: str) -> list[str]:
     text_value = strip_sent_from_suffix(value)
+    text_value = re.sub(r"\s*-\s*\$?\d+(?:\.\d{1,2})?\s*", " ", text_value)
+    text_value = " ".join(text_value.split())
     if not text_value:
         return []
     if "," in text_value or ";" in text_value or "|" in text_value:
@@ -195,6 +197,21 @@ def split_positions_text(value: str) -> list[str]:
             continue
         normalized.append(POSITION_CANONICAL.get(key, part.strip()))
     return normalized
+
+
+def extract_first_email(raw_text: str) -> str:
+    text = (raw_text or "").strip()
+    if not text:
+        return ""
+    match = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)
+    return match.group(0).strip() if match else ""
+
+
+def normalize_phone(raw_phone: str) -> str:
+    text = (raw_phone or "").strip()
+    if not text:
+        return ""
+    return "".join(ch for ch in text if ch.isdigit())
 
 
 def parse_job_application_email(body_html: str) -> ParsedApplication:
@@ -308,6 +325,8 @@ def insert_application(cursor: pyodbc.Cursor, parsed: ParsedApplication, message
     if not parsed_name:
         parsed_name = parse_name_from_subject(subject)
     first_name, last_name = split_name(parsed_name)
+    email_clean = extract_first_email(parsed.get("email", ""))
+    phone_clean = normalize_phone(parsed.get("phone", ""))
 
     submitted_at_raw = message.get("receivedDateTime") or message.get("sentDateTime")
     submitted_at_dt = datetime.now(timezone.utc)
@@ -323,8 +342,8 @@ def insert_application(cursor: pyodbc.Cursor, parsed: ParsedApplication, message
         "sender": extract_sender_address(message),
         "parsed": {
             "name": parsed_name,
-            "email": parsed.get("email", ""),
-            "phone": parsed.get("phone", ""),
+            "email": email_clean,
+            "phone": phone_clean,
             "primary_position": parsed.get("primary_position", ""),
             "other_positions": parsed.get("other_positions", []),
         },
@@ -335,8 +354,8 @@ def insert_application(cursor: pyodbc.Cursor, parsed: ParsedApplication, message
         APPLICATIONS_TABLE,
         message.get("id") or "",
         parsed_name,
-        (parsed.get("email") or "").strip(),
-        (parsed.get("phone") or "").strip(),
+        email_clean,
+        phone_clean,
         (parsed.get("primary_position") or "").strip(),
     )
 
@@ -351,8 +370,8 @@ def insert_application(cursor: pyodbc.Cursor, parsed: ParsedApplication, message
             submitted_at_dt,
             first_name,
             last_name,
-            (parsed.get("email") or "").strip(),
-            (parsed.get("phone") or "").strip(),
+            email_clean,
+            phone_clean,
             (parsed.get("primary_position") or "").strip(),
             json.dumps(parsed.get("other_positions") or []),
             "interest_submitted",

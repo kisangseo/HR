@@ -85,6 +85,8 @@ def strip_sent_from_suffix(value: str) -> str:
 
 def split_positions_text(value: str) -> list[str]:
     text = strip_sent_from_suffix(value)
+    text = re.sub(r"\s*-\s*\$?\d+(?:\.\d{1,2})?\s*", " ", text)
+    text = " ".join(text.split())
     if text in {"—", "-", "--"}:
         return []
     if not text:
@@ -186,6 +188,14 @@ def normalize_phone(raw_phone: str) -> str:
         return ""
     digits = "".join(ch for ch in text if ch.isdigit())
     return digits
+
+
+def extract_first_email(raw_text: str) -> str:
+    text = (raw_text or "").strip()
+    if not text:
+        return ""
+    match = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)
+    return match.group(0).strip() if match else ""
 
 
 def contains_test_name(full_name: str) -> bool:
@@ -565,8 +575,8 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
                 "id": row[0],
                 "submittedAt": submitted_text,
                 "name": row[2],
-                "email": row[3],
-                "phone": row[4],
+                "email": extract_first_email(str(row[3] or "")),
+                "phone": normalize_phone(str(row[4] or "")),
                 "primaryPosition": primary_clean,
                 "otherPositions": list(dict.fromkeys(other_clean)),
                 "status": row[7],
