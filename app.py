@@ -545,7 +545,14 @@ def upsert_cognito_record(cursor, mapped: dict[str, Any], payload: dict[str, Any
 
 
 def parse_json_body(raw_body: str) -> dict[str, Any]:
-    payload = json.loads(raw_body)
+    try:
+        payload = json.loads(raw_body)
+    except json.JSONDecodeError as exc:
+        preview = (raw_body or "")[:200].replace("\n", "\\n")
+        raise ValueError(
+            f"Invalid JSON body at line {exc.lineno}, column {exc.colno}: {exc.msg}. "
+            f"Body preview: {preview}"
+        ) from exc
     if not isinstance(payload, dict):
         raise ValueError("JSON body must be an object.")
     return payload
