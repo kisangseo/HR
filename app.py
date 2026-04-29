@@ -978,7 +978,7 @@ def app(environ, start_response):
                 return _wsgi_json(start_response, {"error": "Unauthorized webhook token."}, 401)
 
             try:
-                payload = parse_json_body(body)
+                payload = parse_json_body(body_text)
                 if "body" in payload:
                     fields = extract_email_fields(str(payload.get("body") or ""))
                     submitted_at = parse_submitted_at(str(payload.get("received") or "")) or datetime.now(timezone.utc).date().isoformat()
@@ -1004,7 +1004,7 @@ def app(environ, start_response):
             if MAKE_WEBHOOK_TOKEN and provided_token != MAKE_WEBHOOK_TOKEN:
                 return _wsgi_json(start_response, {"error": "Unauthorized webhook token."}, 401)
             try:
-                payload = parse_json_body(body)
+                payload = parse_json_body(body_text)
                 mapped = build_record_from_make(payload)
                 if not mapped:
                     return _wsgi_json(start_response, {"error": "Could not parse applicant name from payload."}, 400)
