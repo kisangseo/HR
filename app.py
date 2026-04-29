@@ -19,7 +19,7 @@ except ImportError:  # pragma: no cover
     pyodbc = None
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = "2026-04-27.ingest-diagnostics-v3"
+APP_VERSION = "2026-04-29.cognito-upsert-v1"
 SQL_CONNECTION_STRING = os.getenv("HR_SQL_CONNECTION_STRING", "").strip()
 MAKE_WEBHOOK_TOKEN = os.getenv("HR_MAKE_WEBHOOK_TOKEN", "").strip()
 RUN_INGEST_TOKEN = os.getenv("HR_RUN_INGEST_TOKEN", "").strip()
@@ -190,6 +190,41 @@ def normalize_phone(raw_phone: str) -> str:
     return digits
 
 
+def normalize_phone_us(raw_phone: str) -> str:
+    digits = normalize_phone(raw_phone)
+    if len(digits) == 11 and digits.startswith("1"):
+        return digits[-10:]
+    return digits
+
+
+def normalize_name(raw_value: str) -> str:
+    return " ".join((raw_value or "").strip().lower().split())
+
+
+def normalize_email(raw_email: str) -> str:
+    return (raw_email or "").strip().lower()
+
+
+def parse_bool(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return 1 if value else 0
+    text = str(value).strip().lower()
+    if text in {"1", "true", "t", "yes", "y", "on", "checked"}:
+        return 1
+    if text in {"0", "false", "f", "no", "n", "off", "unchecked"}:
+        return 0
+    return None
+
+
+def clean_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def extract_first_email(raw_text: str) -> str:
     text = (raw_text or "").strip()
     if not text:
@@ -326,6 +361,189 @@ def insert_mapped_record(cursor, mapped: dict[str, Any]) -> None:
     )
 
 
+def upsert_cognito_record(cursor, mapped: dict[str, Any], payload: dict[str, Any]) -> int:
+    first_name = str(mapped.get("first_name") or "").strip()
+    last_name = str(mapped.get("last_name") or "").strip()
+    email = str(mapped.get("email") or "").strip()
+    phone = str(mapped.get("phone") or "").strip()
+
+    first_norm = normalize_name(first_name)
+    last_norm = normalize_name(last_name)
+    email_norm = normalize_email(email)
+    phone_norm = normalize_phone_us(phone)
+
+    candidates = cursor.execute(
+        """
+        SELECT TOP 1 id
+        FROM dbo.job_applications
+        WHERE
+          (
+            (LOWER(LTRIM(RTRIM(COALESCE(first_name_norm, '')))) = ? AND LOWER(LTRIM(RTRIM(COALESCE(last_name_norm, '')))) = ?)
+            OR
+            (LOWER(LTRIM(RTRIM(COALESCE(first_name_norm, '')))) = ? AND LOWER(LTRIM(RTRIM(COALESCE(last_name_norm, '')))) = ?)
+          )
+          AND (
+            (? <> '' AND LOWER(LTRIM(RTRIM(COALESCE(email_norm, '')))) = ?)
+            OR
+            (? <> '' AND LTRIM(RTRIM(COALESCE(phone_norm, ''))) = ?)
+          )
+        ORDER BY COALESCE(cognito_date_updated, updated_at, created_at) DESC
+        """,
+        (first_norm, last_norm, last_norm, first_norm, email_norm, email_norm, phone_norm, phone_norm),
+    ).fetchone()
+
+    status = "Application/Consent to Background Submitted"
+    cognito_form_id = payload.get("cognito_form_id")
+    cognito_entry_number = payload.get("cognito_entry_number")
+    cognito_entry_id = payload.get("cognito_entry_id")
+    cognito_pdf_url = payload.get("cognito_pdf_url")
+
+    middle_name = clean_text(payload.get("middle_name"))
+    address_line1 = clean_text(payload.get("address_line1"))
+    address_line2 = clean_text(payload.get("address_line2"))
+    city = clean_text(payload.get("city"))
+    state = clean_text(payload.get("state"))
+    postal_code = clean_text(payload.get("postal_code"))
+    country = clean_text(payload.get("country"))
+    country_code = clean_text(payload.get("country_code"))
+    full_address = clean_text(payload.get("full_address"))
+    drivers_license_number = clean_text(payload.get("drivers_license_number"))
+    drivers_license_state = clean_text(payload.get("drivers_license_state"))
+    resume_file_name = clean_text(payload.get("resume_file_name"))
+    resume_file_url = clean_text(payload.get("resume_file_url"))
+    resume_content_type = clean_text(payload.get("resume_content_type"))
+    signature_png_url = clean_text(payload.get("signature_png_url"))
+    signature_svg_url = clean_text(payload.get("signature_svg_url"))
+    signature_typed_text = clean_text(payload.get("signature_typed_text"))
+
+    consent_background_investigation = parse_bool(payload.get("consent_background_investigation"))
+    has_valid_drivers_license = parse_bool(payload.get("has_valid_drivers_license"))
+    felony_conviction = parse_bool(payload.get("felony_conviction"))
+    domestic_violence_misdemeanor = parse_bool(payload.get("domestic_violence_misdemeanor"))
+    protective_order = parse_bool(payload.get("protective_order"))
+    currently_under_charges = parse_bool(payload.get("currently_under_charges"))
+    unlawful_drug_use_last_3y = parse_bool(payload.get("unlawful_drug_use_last_3y"))
+    prior_police_service = parse_bool(payload.get("prior_police_service"))
+
+    if candidates:
+        app_id = int(candidates[0])
+        cursor.execute(
+            """
+            UPDATE dbo.job_applications
+            SET
+              submitted_at = ?,
+              first_name = ?,
+              last_name = ?,
+              middle_name = COALESCE(?, middle_name),
+              email = COALESCE(NULLIF(?, ''), email),
+              phone = COALESCE(NULLIF(?, ''), phone),
+              primary_position = ?,
+              other_positions = ?,
+              status = ?,
+              source = 'cognito',
+              raw_payload = ?,
+              first_name_norm = ?,
+              last_name_norm = ?,
+              email_norm = NULLIF(?, ''),
+              phone_norm = NULLIF(?, ''),
+              cognito_form_id = ?,
+              cognito_entry_number = ?,
+              cognito_entry_id = ?,
+              cognito_internal_link = COALESCE(?, cognito_internal_link),
+              cognito_public_link = COALESCE(?, cognito_public_link),
+              cognito_admin_link = COALESCE(?, cognito_admin_link),
+              cognito_document_link = COALESCE(?, cognito_document_link),
+              cognito_date_created = COALESCE(TRY_CAST(? AS DATETIME2), cognito_date_created),
+              cognito_date_submitted = COALESCE(TRY_CAST(? AS DATETIME2), cognito_date_submitted),
+              cognito_date_updated = COALESCE(TRY_CAST(? AS DATETIME2), cognito_date_updated),
+              address_line1 = COALESCE(?, address_line1),
+              address_line2 = COALESCE(?, address_line2),
+              city = COALESCE(?, city),
+              state = COALESCE(?, state),
+              postal_code = COALESCE(?, postal_code),
+              country = COALESCE(?, country),
+              country_code = COALESCE(?, country_code),
+              full_address = COALESCE(?, full_address),
+              consent_background_investigation = COALESCE(?, consent_background_investigation),
+              has_valid_drivers_license = COALESCE(?, has_valid_drivers_license),
+              drivers_license_number = COALESCE(?, drivers_license_number),
+              drivers_license_state = COALESCE(?, drivers_license_state),
+              felony_conviction = COALESCE(?, felony_conviction),
+              domestic_violence_misdemeanor = COALESCE(?, domestic_violence_misdemeanor),
+              protective_order = COALESCE(?, protective_order),
+              currently_under_charges = COALESCE(?, currently_under_charges),
+              unlawful_drug_use_last_3y = COALESCE(?, unlawful_drug_use_last_3y),
+              prior_police_service = COALESCE(?, prior_police_service),
+              resume_file_name = COALESCE(?, resume_file_name),
+              resume_file_url = COALESCE(?, resume_file_url),
+              resume_content_type = COALESCE(?, resume_content_type),
+              signature_png_url = COALESCE(?, signature_png_url),
+              signature_svg_url = COALESCE(?, signature_svg_url),
+              signature_typed_text = COALESCE(?, signature_typed_text),
+              cognito_pdf_url = COALESCE(NULLIF(?, ''), cognito_pdf_url),
+              cognito_pdf_generated_at = CASE WHEN NULLIF(?, '') IS NOT NULL THEN SYSUTCDATETIME() ELSE cognito_pdf_generated_at END,
+              last_cognito_sync_at = SYSUTCDATETIME()
+            WHERE id = ?
+            """,
+            (
+                mapped["submitted_at"], first_name, last_name, middle_name, email, phone, mapped["primary_position"], json.dumps(mapped["other_positions"]), status, json.dumps(payload),
+                first_norm, last_norm, email_norm, phone_norm, cognito_form_id, cognito_entry_number, cognito_entry_id,
+                clean_text(payload.get("cognito_internal_link")), clean_text(payload.get("cognito_public_link")), clean_text(payload.get("cognito_admin_link")), clean_text(payload.get("cognito_document_link")),
+                payload.get("cognito_date_created"), payload.get("cognito_date_submitted"), payload.get("cognito_date_updated"),
+                address_line1, address_line2, city, state, postal_code, country, country_code, full_address,
+                consent_background_investigation, has_valid_drivers_license, drivers_license_number, drivers_license_state, felony_conviction,
+                domestic_violence_misdemeanor, protective_order, currently_under_charges, unlawful_drug_use_last_3y, prior_police_service,
+                resume_file_name, resume_file_url, resume_content_type, signature_png_url, signature_svg_url, signature_typed_text,
+                cognito_pdf_url, cognito_pdf_url, app_id
+            ),
+        )
+    else:
+        cursor.execute(
+            """
+            INSERT INTO dbo.job_applications (
+              submitted_at, first_name, last_name, middle_name, email, phone,
+              primary_position, other_positions, status, source, raw_payload,
+              first_name_norm, last_name_norm, email_norm, phone_norm,
+              cognito_form_id, cognito_entry_number, cognito_entry_id,
+              cognito_internal_link, cognito_public_link, cognito_admin_link, cognito_document_link,
+              cognito_date_created, cognito_date_submitted, cognito_date_updated,
+              address_line1, address_line2, city, state, postal_code, country, country_code, full_address,
+              consent_background_investigation, has_valid_drivers_license, drivers_license_number, drivers_license_state,
+              felony_conviction, domestic_violence_misdemeanor, protective_order, currently_under_charges, unlawful_drug_use_last_3y, prior_police_service,
+              resume_file_name, resume_file_url, resume_content_type, signature_png_url, signature_svg_url, signature_typed_text,
+              cognito_pdf_url, cognito_pdf_generated_at, last_cognito_sync_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'cognito', ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?,
+                      TRY_CAST(? AS DATETIME2), TRY_CAST(? AS DATETIME2), TRY_CAST(? AS DATETIME2),
+                      ?, ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?, ?, ?, ?, ?,
+                      NULLIF(?, ''), CASE WHEN NULLIF(?, '') IS NOT NULL THEN SYSUTCDATETIME() ELSE NULL END, SYSUTCDATETIME())
+            """,
+            (
+                mapped["submitted_at"], first_name, last_name, middle_name, email, phone, mapped["primary_position"], json.dumps(mapped["other_positions"]), status, json.dumps(payload),
+                first_norm, last_norm, email_norm, phone_norm, cognito_form_id, cognito_entry_number, cognito_entry_id,
+                clean_text(payload.get("cognito_internal_link")), clean_text(payload.get("cognito_public_link")), clean_text(payload.get("cognito_admin_link")), clean_text(payload.get("cognito_document_link")),
+                payload.get("cognito_date_created"), payload.get("cognito_date_submitted"), payload.get("cognito_date_updated"),
+                address_line1, address_line2, city, state, postal_code, country, country_code, full_address,
+                consent_background_investigation, has_valid_drivers_license, drivers_license_number, drivers_license_state,
+                felony_conviction, domestic_violence_misdemeanor, protective_order, currently_under_charges, unlawful_drug_use_last_3y, prior_police_service,
+                resume_file_name, resume_file_url, resume_content_type, signature_png_url, signature_svg_url, signature_typed_text,
+                cognito_pdf_url, cognito_pdf_url
+            ),
+        )
+        app_id = int(cursor.execute("SELECT CAST(SCOPE_IDENTITY() AS INT)").fetchone()[0])
+
+    cursor.execute(
+        """
+        INSERT INTO dbo.cognito_submission_history (
+          job_application_id, cognito_form_id, cognito_entry_number, cognito_entry_id, submitted_at, source, raw_payload
+        ) VALUES (?, ?, ?, ?, ?, 'cognito', ?)
+        """,
+        (app_id, cognito_form_id, cognito_entry_number, cognito_entry_id, mapped["submitted_at"], json.dumps(payload)),
+    )
+    return app_id
+
+
 def parse_json_body(raw_body: str) -> dict[str, Any]:
     payload = json.loads(raw_body)
     if not isinstance(payload, dict):
@@ -385,8 +603,8 @@ def build_record_from_make(payload: dict[str, Any]) -> dict[str, Any] | None:
         "phone": normalize_phone(str(payload.get("phone") or payload.get("phone_number") or "")),
         "primary_position": primary_position,
         "other_positions": other_positions,
-        "status": "interest_submitted",
-        "source": "make_webhook",
+        "status": "Application/Consent to Background Submitted",
+        "source": "cognito",
         "raw_payload": payload,
     }
 
@@ -525,7 +743,7 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
     sql = """
         SELECT
             id, submitted_at, full_name, email, phone,
-            primary_position, other_positions, status, source
+            primary_position, other_positions, status, source, cognito_pdf_url
         FROM dbo.job_applications
         WHERE 1 = 1
     """
@@ -581,6 +799,7 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
                 "otherPositions": list(dict.fromkeys(other_clean)),
                 "status": row[7],
                 "source": row[8],
+                "cognitoPdfUrl": row[9],
             }
         )
     # Smart presentation layer:
@@ -759,17 +978,11 @@ def app(environ, start_response):
                 return _wsgi_json(start_response, {"error": "Unauthorized webhook token."}, 401)
 
             try:
-                payload = parse_json_body(body)
-
+                payload = parse_json_body(body_text)
                 if "body" in payload:
                     fields = extract_email_fields(str(payload.get("body") or ""))
                     submitted_at = parse_submitted_at(str(payload.get("received") or "")) or datetime.now(timezone.utc).date().isoformat()
-
-                    mapped = build_record_from_email(
-                        fields,
-                        submitted_at=submitted_at,
-                        raw_payload=payload,
-                    )
+                    mapped = build_record_from_email(fields, submitted_at=submitted_at, raw_payload=payload)
                 else:
                     mapped = build_record_from_make(payload)
                 if not mapped:
@@ -781,6 +994,27 @@ def app(environ, start_response):
                     insert_mapped_record(cursor, mapped)
                     conn.commit()
                 return _wsgi_json(start_response, {"inserted": 1, "source": "make_webhook"})
+            except Exception as exc:
+                return _wsgi_json(start_response, {"error": str(exc)}, 500)
+
+        if path == "/api/ingest-cognito-form":
+            if not body_text.strip():
+                return _wsgi_json(start_response, {"error": "JSON payload is empty."}, 400)
+            provided_token = environ.get("HTTP_X_WEBHOOK_TOKEN", "")
+            if MAKE_WEBHOOK_TOKEN and provided_token != MAKE_WEBHOOK_TOKEN:
+                return _wsgi_json(start_response, {"error": "Unauthorized webhook token."}, 401)
+            try:
+                payload = parse_json_body(body_text)
+                mapped = build_record_from_make(payload)
+                if not mapped:
+                    return _wsgi_json(start_response, {"error": "Could not parse applicant name from payload."}, 400)
+                if contains_test_name(mapped["full_name"]):
+                    return _wsgi_json(start_response, {"inserted": 0, "skipped": 1, "reason": "Name contains 'test'."})
+                with get_sql_connection() as conn:
+                    cursor = conn.cursor()
+                    app_id = upsert_cognito_record(cursor, mapped, payload)
+                    conn.commit()
+                return _wsgi_json(start_response, {"inserted": 1, "source": "cognito", "job_application_id": app_id})
             except Exception as exc:
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
 
@@ -894,25 +1128,16 @@ class Handler(BaseHTTPRequestHandler):
             if not body.strip():
                 self._send_json({"error": "JSON payload is empty."}, 400)
                 return
-
             provided_token = self.headers.get("X-Webhook-Token", "")
             if MAKE_WEBHOOK_TOKEN and provided_token != MAKE_WEBHOOK_TOKEN:
                 self._send_json({"error": "Unauthorized webhook token."}, 401)
                 return
-
             try:
                 payload = parse_json_body(body)
-
-                # NEW: handle raw email from MAKE
                 if "body" in payload:
                     email_text = payload.get("body", "")
                     fields = extract_email_fields(email_text)
-
-                    mapped = build_record_from_email(
-                        fields,
-                        submitted_at=payload.get("received"),
-                        raw_payload=payload
-                    )
+                    mapped = build_record_from_email(fields, submitted_at=payload.get("received"), raw_payload=payload)
                 else:
                     mapped = build_record_from_make(payload)
                 if not mapped:
@@ -926,6 +1151,34 @@ class Handler(BaseHTTPRequestHandler):
                     insert_mapped_record(cursor, mapped)
                     conn.commit()
                 self._send_json({"inserted": 1, "source": "make_webhook"})
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, 500)
+            return
+
+        if parsed.path == "/api/ingest-cognito-form":
+            content_length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(content_length).decode("utf-8")
+            if not body.strip():
+                self._send_json({"error": "JSON payload is empty."}, 400)
+                return
+            provided_token = self.headers.get("X-Webhook-Token", "")
+            if MAKE_WEBHOOK_TOKEN and provided_token != MAKE_WEBHOOK_TOKEN:
+                self._send_json({"error": "Unauthorized webhook token."}, 401)
+                return
+            try:
+                payload = parse_json_body(body)
+                mapped = build_record_from_make(payload)
+                if not mapped:
+                    self._send_json({"error": "Could not parse applicant name from payload."}, 400)
+                    return
+                if contains_test_name(mapped["full_name"]):
+                    self._send_json({"inserted": 0, "skipped": 1, "reason": "Name contains 'test'."})
+                    return
+                with get_sql_connection() as conn:
+                    cursor = conn.cursor()
+                    app_id = upsert_cognito_record(cursor, mapped, payload)
+                    conn.commit()
+                self._send_json({"inserted": 1, "source": "cognito", "job_application_id": app_id})
             except Exception as exc:
                 self._send_json({"error": str(exc)}, 500)
             return
