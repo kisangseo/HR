@@ -1016,6 +1016,7 @@ def app(environ, start_response):
                     conn.commit()
                 return _wsgi_json(start_response, {"inserted": 1, "source": "cognito", "job_application_id": app_id})
             except Exception as exc:
+                logging.exception("/api/ingest-cognito-form failed")
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
 
         if path == "/api/ingest-csv":
@@ -1180,6 +1181,7 @@ class Handler(BaseHTTPRequestHandler):
                     conn.commit()
                 self._send_json({"inserted": 1, "source": "cognito", "job_application_id": app_id})
             except Exception as exc:
+                logging.exception("/api/ingest-cognito-form failed")
                 self._send_json({"error": str(exc)}, 500)
             return
 
