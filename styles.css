@@ -108,3 +108,20 @@ th, td {
   white-space: pre-wrap;
   font-size: 12px;
 }
+
+
+.date-filter {
+  position: relative;
+}
+
+.date-picker-anchor {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  padding: 0;
+  border: 0;
+  pointer-events: none;
+}
