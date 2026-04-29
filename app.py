@@ -332,7 +332,7 @@ def map_row(raw_row: dict[str, str]) -> tuple[dict[str, Any] | None, list[str]]:
         "phone": phone,
         "primary_position": primary_position,
         "other_positions": other_positions,
-        "status": "interest_submitted",
+        "status": "Interest Form Submitted",
         "source": "csv",
         "raw_payload": raw_row,
     }, errors
@@ -765,6 +765,10 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
         sql += " AND LOWER(primary_position) LIKE ?"
         params.append(f"%{filters['job_title'].lower()}%")
 
+    if filters.get("status"):
+        sql += " AND LOWER(status) LIKE ?"
+        params.append(f"%{filters['status'].lower()}%")
+
     if filters.get("date_from"):
         sql += " AND CAST(submitted_at AS date) >= ?"
         params.append(filters["date_from"])
@@ -871,6 +875,20 @@ def query_job_titles() -> list[str]:
     return sorted(set(cleaned), key=lambda item: item.lower())
 
 
+
+
+def query_statuses() -> list[str]:
+    sql = """
+        SELECT DISTINCT status
+        FROM dbo.job_applications
+        WHERE status IS NOT NULL AND LTRIM(RTRIM(status)) <> ''
+        ORDER BY status ASC
+    """
+    with get_sql_connection() as conn:
+        cursor = conn.cursor()
+        rows = cursor.execute(sql).fetchall()
+    return [str(row[0]).strip() for row in rows if str(row[0]).strip()]
+
 def run_email_ingest(scan_limit: int, source_folder: str = "all") -> dict[str, Any]:
     from email_ingest import run_ingest
 
@@ -960,6 +978,7 @@ def app(environ, start_response):
             filters = {
                 "name": (query.get("name") or [""])[0],
                 "job_title": (query.get("job_title") or [""])[0],
+                "status": (query.get("status") or [""])[0],
                 "date_from": (query.get("date_from") or [""])[0],
                 "date_to": (query.get("date_to") or [""])[0],
             }
@@ -972,6 +991,12 @@ def app(environ, start_response):
             try:
                 titles = query_job_titles()
                 return _wsgi_json(start_response, {"job_titles": titles})
+            except Exception as exc:
+                return _wsgi_json(start_response, {"error": str(exc)}, 500)
+        if path == "/api/statuses":
+            try:
+                statuses = query_statuses()
+                return _wsgi_json(start_response, {"statuses": statuses})
             except Exception as exc:
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
         return _wsgi_json(start_response, {"error": "Not Found"}, 404)
@@ -1084,6 +1109,7 @@ class Handler(BaseHTTPRequestHandler):
             filters = {
                 "name": (query.get("name") or [""])[0],
                 "job_title": (query.get("job_title") or [""])[0],
+                "status": (query.get("status") or [""])[0],
                 "date_from": (query.get("date_from") or [""])[0],
                 "date_to": (query.get("date_to") or [""])[0],
             }
@@ -1097,6 +1123,13 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/job-titles":
             try:
                 self._send_json({"job_titles": query_job_titles()})
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, 500)
+            return
+
+        if parsed.path == "/api/statuses":
+            try:
+                self._send_json({"statuses": query_statuses()})
             except Exception as exc:
                 self._send_json({"error": str(exc)}, 500)
             return

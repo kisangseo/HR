@@ -7,6 +7,7 @@ const els = {
   dateRangeFilter: document.getElementById('dateRangeFilter'),
   datePicker: document.getElementById('datePicker'),
   jobTitleFilter: document.getElementById('jobTitleFilter'),
+  statusFilter: document.getElementById('statusFilter'),
   clearFiltersBtn: document.getElementById('clearFiltersBtn'),
   applicantRows: document.getElementById('applicantRows')
 };
@@ -20,6 +21,7 @@ els.nameFilter.addEventListener('input', loadApplicants);
 els.dateRangeFilter.addEventListener('click', openDatePicker);
 els.datePicker.addEventListener('change', handleDateSelection);
 els.jobTitleFilter.addEventListener('change', loadApplicants);
+els.statusFilter.addEventListener('change', loadApplicants);
 
 els.clearFiltersBtn.addEventListener('click', () => {
   els.nameFilter.value = '';
@@ -27,6 +29,7 @@ els.clearFiltersBtn.addEventListener('click', () => {
   dateRangeState.to = '';
   renderDateRangeFilter();
   els.jobTitleFilter.value = '';
+  els.statusFilter.value = '';
   loadApplicants();
 });
 
@@ -83,7 +86,8 @@ async function loadApplicants() {
     name: els.nameFilter.value.trim(),
     date_from: dateFrom,
     date_to: dateTo,
-    job_title: els.jobTitleFilter.value.trim()
+    job_title: els.jobTitleFilter.value.trim(),
+    status: els.statusFilter.value.trim()
   });
 
   const response = await fetch(`/api/applicants?${params.toString()}`);
@@ -188,4 +192,20 @@ async function loadJobTitles() {
   }
 }
 
-Promise.all([loadJobTitles(), loadApplicants()]).catch((error) => console.error(error));
+
+async function loadStatuses() {
+  const response = await fetch('/api/statuses');
+  const payload = await response.json();
+  const statuses = payload.statuses || [];
+  const existing = new Set(Array.from(els.statusFilter.options).map((option) => option.value.toLowerCase()));
+  for (const status of statuses) {
+    const text = String(status || '').trim();
+    if (!text || existing.has(text.toLowerCase())) continue;
+    const option = document.createElement('option');
+    option.value = text;
+    option.textContent = text;
+    els.statusFilter.appendChild(option);
+  }
+}
+
+Promise.all([loadJobTitles(), loadStatuses(), loadApplicants()]).catch((error) => console.error(error));
