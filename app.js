@@ -145,6 +145,11 @@ function shortenPosition(value) {
   const text = String(value || '').trim();
   const key = text.toLowerCase();
   if (key === 'court security officer') return 'CSO';
+  if (key === 'court security officer ft') return 'CSO FT';
+  if (key === 'court security officer pt') return 'CSO PT';
+  if (key.startsWith('court security officer ')) {
+    return text.replace(/court security officer\s+/i, 'CSO ');
+  }
   if (key === 'deputy sheriff') return 'Deputy';
   if (key === 'radio dispatcher') return 'Radio';
   if (key === 'information technology') return 'IT';
