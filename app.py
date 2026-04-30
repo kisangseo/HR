@@ -568,6 +568,41 @@ def upsert_cognito_record(cursor, mapped: dict[str, Any], payload: dict[str, Any
     return app_id
 
 
+
+
+def upsert_background_record(cursor, mapped: dict[str, Any], payload: dict[str, Any]) -> int:
+    email_norm = normalize_email(str(mapped.get("email") or ""))
+    phone_norm = normalize_phone_us(str(mapped.get("phone") or ""))
+    row = cursor.execute(
+        """
+        SELECT TOP 1 id
+        FROM dbo.job_applications
+        WHERE (? <> '' AND LOWER(LTRIM(RTRIM(COALESCE(email_norm, '')))) = ?)
+           OR (? <> '' AND LTRIM(RTRIM(COALESCE(phone_norm, ''))) = ?)
+        ORDER BY COALESCE(updated_at, created_at) DESC
+        """,
+        (email_norm, email_norm, phone_norm, phone_norm),
+    ).fetchone()
+    if not row:
+        app_id = upsert_cognito_record(cursor, mapped, payload)
+    else:
+        app_id = int(row[0])
+        cursor.execute(
+            """
+            UPDATE dbo.job_applications
+            SET status = 'Background Check Submitted',
+                raw_payload = ?,
+                cognito_pdf_url = COALESCE(NULLIF(?, ''), cognito_pdf_url),
+                cognito_document_link = COALESCE(NULLIF(?, ''), cognito_document_link),
+                cognito_date_submitted = COALESCE(TRY_CAST(? AS DATETIME2), cognito_date_submitted),
+                last_cognito_sync_at = SYSUTCDATETIME()
+            WHERE id = ?
+            """,
+            (json.dumps(payload), clean_text(payload.get("background_pdf_url")), clean_text(payload.get("background_document_url")), payload.get("cognito_date_submitted"), app_id),
+        )
+    return app_id
+
+
 def parse_json_body(raw_body: str) -> dict[str, Any]:
     try:
         payload = json.loads(raw_body)
@@ -770,11 +805,35 @@ def ingest_csv(csv_text: str) -> dict[str, Any]:
     }
 
 
+
+
+def build_document_links(cognito_pdf_url: Any, cognito_document_link: Any, resume_file_url: Any, raw_payload: Any) -> list[dict[str, str]]:
+    links: list[dict[str, str]] = []
+
+    def add(label: str, url: Any):
+        text = str(url or "").strip()
+        if not text:
+            return
+        if any(item["url"] == text for item in links):
+            return
+        links.append({"label": label, "url": text})
+
+    add("Initial Application / Consent Form", cognito_pdf_url)
+    add("Initial Application Document", cognito_document_link)
+    add("Resume", resume_file_url)
+
+    payload_obj = raw_payload if isinstance(raw_payload, dict) else {}
+    add("Background Check Form", payload_obj.get("background_pdf_url") or payload_obj.get("Entry.Document2"))
+    add("Background Check Document", payload_obj.get("background_document_url") or payload_obj.get("Entry.Document1"))
+
+    return links
+
+
 def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
     sql = """
         SELECT
             id, submitted_at, full_name, email, phone,
-            primary_position, other_positions, status, source, cognito_pdf_url, cognito_document_link
+            primary_position, other_positions, status, source, cognito_pdf_url, cognito_document_link, resume_file_url, raw_payload
         FROM dbo.job_applications
         WHERE 1 = 1
     """
@@ -838,6 +897,7 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
                 "source": row[8],
                 "cognitoPdfUrl": row[9],
                 "cognitoDocumentLink": row[10],
+                "documents": build_document_links(row[9], row[10], row[11], json.loads(row[12] or "{}") if row[12] else {}),
             }
         )
     # Smart presentation layer:
@@ -1115,6 +1175,26 @@ def app(environ, start_response):
             except Exception as exc:
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
 
+        if path == "/api/ingest-background-form":
+            if not body_text.strip():
+                return _wsgi_json(start_response, {"error": "JSON payload is empty."}, 400)
+            provided_token = environ.get("HTTP_X_WEBHOOK_TOKEN", "")
+            if MAKE_WEBHOOK_TOKEN and provided_token != MAKE_WEBHOOK_TOKEN:
+                return _wsgi_json(start_response, {"error": "Unauthorized webhook token."}, 401)
+            try:
+                payload = parse_json_body(body_text)
+                mapped = build_record_from_make(payload)
+                if not mapped:
+                    return _wsgi_json(start_response, {"error": "Could not parse applicant name from payload."}, 400)
+                with get_sql_connection() as conn:
+                    cursor = conn.cursor()
+                    app_id = upsert_background_record(cursor, mapped, payload)
+                    conn.commit()
+                return _wsgi_json(start_response, {"inserted": 1, "source": "background_check", "job_application_id": app_id})
+            except Exception as exc:
+                logging.exception("/api/ingest-background-form failed")
+                return _wsgi_json(start_response, {"error": str(exc)}, 500)
+
         if path == "/api/ingest-cognito-form":
             if not body_text.strip():
                 return _wsgi_json(start_response, {"error": "JSON payload is empty."}, 400)
@@ -1297,6 +1377,32 @@ class Handler(BaseHTTPRequestHandler):
                     conn.commit()
                 self._send_json({"inserted": 1, "source": "make_webhook"})
             except Exception as exc:
+                self._send_json({"error": str(exc)}, 500)
+            return
+
+        if parsed.path == "/api/ingest-background-form":
+            content_length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(content_length).decode("utf-8")
+            if not body.strip():
+                self._send_json({"error": "JSON payload is empty."}, 400)
+                return
+            provided_token = self.headers.get("X-Webhook-Token", "")
+            if MAKE_WEBHOOK_TOKEN and provided_token != MAKE_WEBHOOK_TOKEN:
+                self._send_json({"error": "Unauthorized webhook token."}, 401)
+                return
+            try:
+                payload = parse_json_body(body)
+                mapped = build_record_from_make(payload)
+                if not mapped:
+                    self._send_json({"error": "Could not parse applicant name from payload."}, 400)
+                    return
+                with get_sql_connection() as conn:
+                    cursor = conn.cursor()
+                    app_id = upsert_background_record(cursor, mapped, payload)
+                    conn.commit()
+                self._send_json({"inserted": 1, "source": "background_check", "job_application_id": app_id})
+            except Exception as exc:
+                logging.exception("/api/ingest-background-form failed")
                 self._send_json({"error": str(exc)}, 500)
             return
 
