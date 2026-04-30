@@ -228,8 +228,12 @@ def clean_text(value: Any) -> str | None:
 def normalize_status_label(value: Any) -> str:
     text = str(value or '').strip()
     lowered = text.lower()
-    if lowered in {'interest_submitted', 'interest form submitted'}:
+    if lowered in {'interest_submitted', 'interest form submitted', 'interest submitted'}:
         return 'Interest Submitted'
+    if lowered in {'approval needed for background check', 'needs approval'}:
+        return 'Needs Approval'
+    if lowered in {'application/consent to background submitted', 'approved - background check sent', 'background check sent'}:
+        return 'Background Check Sent'
     return text
 
 
@@ -400,7 +404,6 @@ def upsert_cognito_record(cursor, mapped: dict[str, Any], payload: dict[str, Any
         (first_norm, last_norm, last_norm, first_norm, email_norm, email_norm, phone_norm, phone_norm),
     ).fetchone()
 
-    status = "Application/Consent to Background Submitted"
     cognito_form_id = payload.get("cognito_form_id")
     cognito_entry_number = payload.get("cognito_entry_number")
     cognito_entry_id = payload.get("cognito_entry_id")
@@ -432,6 +435,15 @@ def upsert_cognito_record(cursor, mapped: dict[str, Any], payload: dict[str, Any
     currently_under_charges = parse_bool(payload.get("currently_under_charges"))
     unlawful_drug_use_last_3y = parse_bool(payload.get("unlawful_drug_use_last_3y"))
     prior_police_service = parse_bool(payload.get("prior_police_service"))
+
+    flagged_responses = (
+        felony_conviction,
+        domestic_violence_misdemeanor,
+        protective_order,
+        currently_under_charges,
+        unlawful_drug_use_last_3y,
+    )
+    status = "Needs Approval" if any(value == 1 for value in flagged_responses) else "Background Check Sent"
 
     if candidates:
         app_id = int(candidates[0])
