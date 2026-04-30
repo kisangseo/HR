@@ -30,6 +30,8 @@ INDEX_HTML = ROOT / "index.html"
 STATIC_JS = ROOT / "app.js"
 STATIC_CSS = ROOT / "styles.css"
 
+APPROVER_PERMISSIONS = {"admin", "edit", "supervisor"}
+
 ALIASES = {
     "first_name": ["first name", "first_name", "firstname", "name first"],
     "last_name": ["last name", "last_name", "lastname", "name last"],
@@ -924,6 +926,38 @@ def query_statuses() -> list[str]:
         output.append(normalized)
     return output
 
+def _is_allowed_approver(permission: str) -> bool:
+    return (permission or "").strip().lower() in APPROVER_PERMISSIONS
+
+
+def _approve_or_deny_application(application_id: int, action: str, actor_email: str) -> None:
+    action_value = (action or "").strip().lower()
+    if action_value not in {"approve", "deny"}:
+        raise ValueError("Unsupported action.")
+    if action_value == "approve":
+        sql = """
+        UPDATE dbo.job_applications
+        SET status = 'Background Check Sent',
+            hr_decision = 'approved',
+            approved_by = ?,
+            approved_at = SYSUTCDATETIME()
+        WHERE id = ?
+        """
+    else:
+        sql = """
+        UPDATE dbo.job_applications
+        SET status = 'Denied',
+            hr_decision = 'denied',
+            denied_by = ?,
+            denied_at = SYSUTCDATETIME()
+        WHERE id = ?
+        """
+    with get_sql_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(sql, (actor_email, application_id))
+        conn.commit()
+
+
 def run_email_ingest(scan_limit: int, source_folder: str = "all") -> dict[str, Any]:
     from email_ingest import run_ingest
 
@@ -1037,6 +1071,22 @@ def app(environ, start_response):
         return _wsgi_json(start_response, {"error": "Not Found"}, 404)
 
     if method == "POST":
+        applicant_action_match = re.fullmatch(r"/api/applicants/(\d+)/(approve|deny)", path or "")
+        if applicant_action_match:
+            actor_email = (environ.get("HTTP_X_USER_EMAIL", "") or "").strip()
+            actor_permission = (environ.get("HTTP_X_USER_PERMISSION", "") or "").strip()
+            if not actor_email:
+                return _wsgi_json(start_response, {"error": "Missing X-User-Email."}, 400)
+            if not _is_allowed_approver(actor_permission):
+                return _wsgi_json(start_response, {"error": "Forbidden."}, 403)
+            app_id = int(applicant_action_match.group(1))
+            action = applicant_action_match.group(2)
+            try:
+                _approve_or_deny_application(app_id, action, actor_email)
+                return _wsgi_json(start_response, {"ok": True, "id": app_id, "action": action})
+            except Exception as exc:
+                return _wsgi_json(start_response, {"error": str(exc)}, 500)
+
         if path == "/api/ingest-interest-form":
             if not body_text.strip():
                 return _wsgi_json(start_response, {"error": "JSON payload is empty."}, 400)
@@ -1199,6 +1249,24 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        applicant_action_match = re.fullmatch(r"/api/applicants/(\d+)/(approve|deny)", parsed.path or "")
+        if applicant_action_match:
+            actor_email = (self.headers.get("X-User-Email", "") or "").strip()
+            actor_permission = (self.headers.get("X-User-Permission", "") or "").strip()
+            if not actor_email:
+                self._send_json({"error": "Missing X-User-Email."}, 400)
+                return
+            if not _is_allowed_approver(actor_permission):
+                self._send_json({"error": "Forbidden."}, 403)
+                return
+            app_id = int(applicant_action_match.group(1))
+            action = applicant_action_match.group(2)
+            try:
+                _approve_or_deny_application(app_id, action, actor_email)
+                self._send_json({"ok": True, "id": app_id, "action": action})
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, 500)
+            return
         if parsed.path == "/api/ingest-interest-form":
             content_length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(content_length).decode("utf-8")
