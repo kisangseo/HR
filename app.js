@@ -7,6 +7,7 @@ const els = {
   dateRangeFilter: document.getElementById('dateRangeFilter'),
   datePicker: document.getElementById('datePicker'),
   jobTitleFilter: document.getElementById('jobTitleFilter'),
+  statusFilter: document.getElementById('statusFilter'),
   clearFiltersBtn: document.getElementById('clearFiltersBtn'),
   applicantRows: document.getElementById('applicantRows')
 };
@@ -20,6 +21,7 @@ els.nameFilter.addEventListener('input', loadApplicants);
 els.dateRangeFilter.addEventListener('click', openDatePicker);
 els.datePicker.addEventListener('change', handleDateSelection);
 els.jobTitleFilter.addEventListener('change', loadApplicants);
+els.statusFilter.addEventListener('change', loadApplicants);
 
 els.clearFiltersBtn.addEventListener('click', () => {
   els.nameFilter.value = '';
@@ -27,6 +29,7 @@ els.clearFiltersBtn.addEventListener('click', () => {
   dateRangeState.to = '';
   renderDateRangeFilter();
   els.jobTitleFilter.value = '';
+  els.statusFilter.value = '';
   loadApplicants();
 });
 
@@ -83,7 +86,8 @@ async function loadApplicants() {
     name: els.nameFilter.value.trim(),
     date_from: dateFrom,
     date_to: dateTo,
-    job_title: els.jobTitleFilter.value.trim()
+    job_title: els.jobTitleFilter.value.trim(),
+    status: els.statusFilter.value.trim()
   });
 
   const response = await fetch(`/api/applicants?${params.toString()}`);
@@ -94,7 +98,7 @@ async function loadApplicants() {
 
 function renderTable(applicants) {
   if (!applicants.length) {
-    els.applicantRows.innerHTML = '<tr><td colspan="7">No applicants found.</td></tr>';
+    els.applicantRows.innerHTML = '<tr><td colspan="9">No applicants found.</td></tr>';
     return;
   }
 
@@ -115,11 +119,19 @@ function renderTable(applicants) {
         <td>${escapeHtml(applicant.status || '—')}</td>
         <td>${escapeHtml(applicant.email || '—')}</td>
         <td>${escapeHtml(applicant.phone || '—')}</td>
+        <td>${renderPdfLink(applicant.cognitoPdfUrl || applicant.cognitoDocumentLink)}</td>
+        <td>${renderActionCell(applicant)}</td>
       </tr>`;
     })
     .join('');
 }
 
+
+function renderPdfLink(url) {
+  const text = String(url || '').trim();
+  if (!text) return '—';
+  return `<a href="${escapeHtml(text)}" target="_blank" rel="noopener noreferrer">Download PDF</a>`;
+}
 function cleanDisplayPosition(value) {
   const text = String(value || '').trim();
   if (!text) return '';
@@ -134,6 +146,11 @@ function shortenPosition(value) {
   const text = String(value || '').trim();
   const key = text.toLowerCase();
   if (key === 'court security officer') return 'CSO';
+  if (key === 'court security officer ft') return 'CSO FT';
+  if (key === 'court security officer pt') return 'CSO PT';
+  if (key.startsWith('court security officer ')) {
+    return text.replace(/court security officer\s+/i, 'CSO ');
+  }
   if (key === 'deputy sheriff') return 'Deputy';
   if (key === 'radio dispatcher') return 'Radio';
   if (key === 'information technology') return 'IT';
@@ -181,4 +198,79 @@ async function loadJobTitles() {
   }
 }
 
-Promise.all([loadJobTitles(), loadApplicants()]).catch((error) => console.error(error));
+
+async function loadStatuses() {
+  const response = await fetch('/api/statuses');
+  const payload = await response.json();
+  const statuses = payload.statuses || [];
+  const existing = new Set(Array.from(els.statusFilter.options).map((option) => option.value.toLowerCase()));
+  for (const status of statuses) {
+    const text = String(status || '').trim();
+    if (!text || existing.has(text.toLowerCase())) continue;
+    const option = document.createElement('option');
+    option.value = text;
+    option.textContent = text;
+    els.statusFilter.appendChild(option);
+  }
+}
+
+Promise.all([loadJobTitles(), loadStatuses(), loadApplicants()]).catch((error) => console.error(error));
+
+
+function getReviewerContext() {
+  let email = localStorage.getItem('hrReviewerEmail') || '';
+  let permission = localStorage.getItem('hrReviewerPermission') || '';
+  if (!email) {
+    email = window.prompt('Enter your HR email for approve/deny actions:') || '';
+    if (!email.trim()) return null;
+    localStorage.setItem('hrReviewerEmail', email.trim());
+  }
+  if (!permission) {
+    permission = (window.prompt('Enter your permission (admin/edit/supervisor):') || '').toLowerCase().trim();
+    if (!permission) return null;
+    localStorage.setItem('hrReviewerPermission', permission);
+  }
+  return { email: email.trim(), permission: permission.trim() };
+}
+
+function renderActionCell(applicant) {
+  const status = String(applicant.status || '').toLowerCase();
+  if (status !== 'needs approval') return '—';
+  return `
+    <div class="action-buttons">
+      <button type="button" class="small-btn" data-action="approve" data-id="${applicant.id}" data-email="${escapeHtml(applicant.email || '')}">Approve</button>
+      <button type="button" class="small-btn danger" data-action="deny" data-id="${applicant.id}" data-email="${escapeHtml(applicant.email || '')}">Deny</button>
+    </div>
+  `;
+}
+
+els.applicantRows.addEventListener('click', async (event) => {
+  const btn = event.target.closest('button[data-action]');
+  if (!btn) return;
+  const action = btn.getAttribute('data-action');
+  const id = btn.getAttribute('data-id');
+  const applicantEmail = btn.getAttribute('data-email') || 'this applicant';
+  const ok = window.confirm(`Are you sure you want to ${action} and send ${action} email to ${applicantEmail}?`);
+  if (!ok) return;
+
+  const reviewer = getReviewerContext();
+  if (!reviewer) return;
+
+  btn.disabled = true;
+  try {
+    const response = await fetch(`/api/applicants/${id}/${action}`, {
+      method: 'POST',
+      headers: {
+        'X-User-Email': reviewer.email,
+        'X-User-Permission': reviewer.permission
+      }
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || 'Action failed');
+    await loadApplicants();
+  } catch (err) {
+    alert(err.message || String(err));
+  } finally {
+    btn.disabled = false;
+  }
+});
