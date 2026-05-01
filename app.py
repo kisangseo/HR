@@ -827,7 +827,7 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
     sql = """
         SELECT
             id, submitted_at, full_name, email, phone,
-            primary_position, other_positions, status, source, cognito_pdf_url, cognito_document_link, background_pdf_url, background_document_url, resume_file_url, contacted
+            primary_position, other_positions, status, source, cognito_pdf_url, cognito_document_link, background_pdf_url, background_document_url, resume_file_url, contacted, denied
         FROM dbo.job_applications
         WHERE 1 = 1
     """
@@ -842,9 +842,14 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
         sql += " AND LOWER(primary_position) LIKE ?"
         params.append(f"%{filters['job_title'].lower()}%")
 
-    if filters.get("status"):
+    status_value = (filters.get("status") or "").strip().lower()
+    if status_value == "denied":
+        sql += " AND denied = 1"
+    else:
+        sql += " AND ISNULL(denied, 0) = 0"
+
+    if filters.get("status") and status_value != "denied":
         sql += " AND (LOWER(status) LIKE ? OR LOWER(REPLACE(status, '_', ' ')) LIKE ?)"
-        status_value = filters['status'].lower()
         params.append(f"%{status_value}%")
         params.append(f"%{status_value}%")
 
@@ -895,7 +900,7 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
                 "phone": normalize_phone(str(row[4] or "")),
                 "primaryPosition": primary_clean,
                 "otherPositions": list(dict.fromkeys(other_clean)),
-                "status": normalize_status_label(row[7]),
+                "status": "Denied" if bool(row[15]) else normalize_status_label(row[7]),
                 "source": row[8],
                 "cognitoPdfUrl": row[9],
                 "cognitoDocumentLink": row[10],
@@ -996,26 +1001,64 @@ def query_statuses() -> list[str]:
             continue
         seen.add(key)
         output.append(normalized)
-    return output
+    if "denied" not in {value.lower() for value in output}:
+        output.append("Denied")
+    return sorted(output, key=lambda value: value.lower())
 
 def _approve_or_deny_application(application_id: int, action: str) -> None:
     action_value = (action or "").strip().lower()
     if action_value == "approve":
         new_status = "Needs Approval - Approved"
+        sql = """
+            UPDATE dbo.job_applications
+            SET status = ?,
+                denied = 0
+            WHERE id = ?
+        """
     elif action_value == "deny":
-        new_status = "Needs Approval - Denied"
+        new_status = None
+        sql = """
+            UPDATE dbo.job_applications
+            SET denied = 1
+            WHERE id = ?
+        """
     else:
         raise ValueError("Unsupported action.")
 
     with get_sql_connection() as conn:
         cursor = conn.cursor()
+        if action_value == "approve":
+            cursor.execute(sql, (new_status, application_id))
+        else:
+            cursor.execute(sql, (application_id,))
+        conn.commit()
+
+
+def _deny_applications(application_ids: list[int]) -> int:
+    ids = sorted({int(value) for value in application_ids if int(value) > 0})
+    if not ids:
+        return 0
+    placeholders = ",".join("?" for _ in ids)
+    with get_sql_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"UPDATE dbo.job_applications SET denied = 1 WHERE id IN ({placeholders})",
+            ids,
+        )
+        conn.commit()
+        return int(cursor.rowcount or 0)
+
+
+def _undo_denial(application_id: int) -> None:
+    with get_sql_connection() as conn:
+        cursor = conn.cursor()
         cursor.execute(
             """
             UPDATE dbo.job_applications
-            SET status = ?
+            SET denied = 0
             WHERE id = ?
             """,
-            (new_status, application_id),
+            (application_id,),
         )
         conn.commit()
 
@@ -1148,6 +1191,29 @@ def app(environ, start_response):
         return _wsgi_json(start_response, {"error": "Not Found"}, 404)
 
     if method == "POST":
+        if path == "/api/applicants/deny":
+            try:
+                payload = parse_json_body(body_text or "{}")
+            except Exception:
+                return _wsgi_json(start_response, {"error": "Invalid JSON payload."}, 400)
+            ids = payload.get("ids") if isinstance(payload, dict) else []
+            if not isinstance(ids, list):
+                return _wsgi_json(start_response, {"error": "Expected 'ids' array."}, 400)
+            try:
+                denied_count = _deny_applications([int(value) for value in ids])
+                return _wsgi_json(start_response, {"ok": True, "denied_count": denied_count})
+            except Exception as exc:
+                return _wsgi_json(start_response, {"error": str(exc)}, 500)
+
+        undo_denial_match = re.fullmatch(r"/api/applicants/(\d+)/undo-denial", path or "")
+        if undo_denial_match:
+            app_id = int(undo_denial_match.group(1))
+            try:
+                _undo_denial(app_id)
+                return _wsgi_json(start_response, {"ok": True, "id": app_id, "action": "undo-denial"})
+            except Exception as exc:
+                return _wsgi_json(start_response, {"error": str(exc)}, 500)
+
         applicant_action_match = re.fullmatch(r"/api/applicants/(\d+)/(approve|deny)", path or "")
         if applicant_action_match:
             app_id = int(applicant_action_match.group(1))
@@ -1354,6 +1420,33 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        undo_denial_match = re.fullmatch(r"/api/applicants/(\d+)/undo-denial", parsed.path or "")
+        if undo_denial_match:
+            app_id = int(undo_denial_match.group(1))
+            try:
+                _undo_denial(app_id)
+                self._send_json({"ok": True, "id": app_id, "action": "undo-denial"})
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, 500)
+            return
+        if parsed.path == "/api/applicants/deny":
+            content_length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(content_length).decode("utf-8")
+            try:
+                payload = parse_json_body(body or "{}")
+            except Exception:
+                self._send_json({"error": "Invalid JSON payload."}, 400)
+                return
+            ids = payload.get("ids") if isinstance(payload, dict) else []
+            if not isinstance(ids, list):
+                self._send_json({"error": "Expected 'ids' array."}, 400)
+                return
+            try:
+                denied_count = _deny_applications([int(value) for value in ids])
+                self._send_json({"ok": True, "denied_count": denied_count})
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, 500)
+            return
         applicant_action_match = re.fullmatch(r"/api/applicants/(\d+)/(approve|deny)", parsed.path or "")
         if applicant_action_match:
             app_id = int(applicant_action_match.group(1))
