@@ -858,7 +858,15 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
         sql += " AND CAST(submitted_at AS date) <= ?"
         params.append(filters["date_to"])
 
-    sql += " ORDER BY submitted_at DESC"
+    sql += """
+        ORDER BY
+            CASE
+                WHEN status = 'Background Check Submitted' THEN 1
+                WHEN status = 'Needs Approval' THEN 2
+                ELSE 3
+            END,
+            submitted_at DESC
+        """
 
     with get_sql_connection() as conn:
         cursor = conn.cursor()
