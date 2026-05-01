@@ -3,6 +3,15 @@ const state = {
 };
 
 const els = {
+  authSection: document.getElementById('authSection'),
+  appSection: document.getElementById('appSection'),
+  loginEmail: document.getElementById('loginEmail'),
+  loginPassword: document.getElementById('loginPassword'),
+  loginBtn: document.getElementById('loginBtn'),
+  changePasswordSection: document.getElementById('changePasswordSection'),
+  newPassword: document.getElementById('newPassword'),
+  changePasswordBtn: document.getElementById('changePasswordBtn'),
+  authMessage: document.getElementById('authMessage'),
   nameFilter: document.getElementById('nameFilter'),
   dateRangeFilter: document.getElementById('dateRangeFilter'),
   datePicker: document.getElementById('datePicker'),
@@ -98,7 +107,7 @@ async function loadApplicants() {
 
 function renderTable(applicants) {
   if (!applicants.length) {
-    els.applicantRows.innerHTML = '<tr><td colspan="9">No applicants found.</td></tr>';
+    els.applicantRows.innerHTML = '<tr><td colspan="10">No applicants found.</td></tr>';
     return;
   }
 
@@ -120,6 +129,7 @@ function renderTable(applicants) {
         <td>${escapeHtml(applicant.email || '—')}</td>
         <td>${escapeHtml(applicant.phone || '—')}</td>
         <td>${renderDocumentLinks(applicant.documents || [])}</td>
+        <td>${renderContactedCell(applicant)}</td>
         <td>${renderActionCell(applicant)}</td>
       </tr>`;
     })
@@ -221,23 +231,19 @@ async function loadStatuses() {
   }
 }
 
-Promise.all([loadJobTitles(), loadStatuses(), loadApplicants()]).catch((error) => console.error(error));
-
-
-function getReviewerContext() {
-  let email = localStorage.getItem('hrReviewerEmail') || '';
-  let permission = localStorage.getItem('hrReviewerPermission') || '';
-  if (!email) {
-    email = window.prompt('Enter your HR email for approve/deny actions:') || '';
-    if (!email.trim()) return null;
-    localStorage.setItem('hrReviewerEmail', email.trim());
+async function initializeApp() {
+  const response = await fetch('/api/me');
+  if (!response.ok) return;
+  const payload = await response.json();
+  if (!payload.authenticated) return;
+  if (payload.user?.must_change_password) {
+    els.changePasswordSection.hidden = false;
+    els.authMessage.textContent = 'Password change required.';
+    return;
   }
-  if (!permission) {
-    permission = (window.prompt('Enter your permission (admin/edit/supervisor):') || '').toLowerCase().trim();
-    if (!permission) return null;
-    localStorage.setItem('hrReviewerPermission', permission);
-  }
-  return { email: email.trim(), permission: permission.trim() };
+  els.authSection.hidden = true;
+  els.appSection.hidden = false;
+  await Promise.all([loadJobTitles(), loadStatuses(), loadApplicants()]);
 }
 
 function renderActionCell(applicant) {
@@ -251,6 +257,11 @@ function renderActionCell(applicant) {
   `;
 }
 
+function renderContactedCell(applicant) {
+  const checked = applicant.contacted ? 'checked' : '';
+  return `<input type="checkbox" data-contacted-id="${applicant.id}" ${checked} />`;
+}
+
 els.applicantRows.addEventListener('click', async (event) => {
   const btn = event.target.closest('button[data-action]');
   if (!btn) return;
@@ -260,17 +271,10 @@ els.applicantRows.addEventListener('click', async (event) => {
   const ok = window.confirm(`Are you sure you want to ${action} and send ${action} email to ${applicantEmail}?`);
   if (!ok) return;
 
-  const reviewer = getReviewerContext();
-  if (!reviewer) return;
-
   btn.disabled = true;
   try {
     const response = await fetch(`/api/applicants/${id}/${action}`, {
-      method: 'POST',
-      headers: {
-        'X-User-Email': reviewer.email,
-        'X-User-Permission': reviewer.permission
-      }
+      method: 'POST'
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || 'Action failed');
@@ -279,5 +283,58 @@ els.applicantRows.addEventListener('click', async (event) => {
     alert(err.message || String(err));
   } finally {
     btn.disabled = false;
+  }
+});
+
+els.loginBtn.addEventListener('click', async () => {
+  const email = els.loginEmail.value.trim();
+  const password = els.loginPassword.value;
+  const response = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) });
+  const payload = await response.json();
+  if (!response.ok) {
+    els.authMessage.textContent = payload.error || 'Login failed.';
+    return;
+  }
+  if (payload.must_change_password) {
+    els.changePasswordSection.hidden = false;
+    els.authMessage.textContent = 'Password change required.';
+    return;
+  }
+  await initializeApp();
+});
+
+els.changePasswordBtn.addEventListener('click', async () => {
+  const new_password = els.newPassword.value;
+  const response = await fetch('/api/change-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ new_password }) });
+  const payload = await response.json();
+  if (!response.ok) {
+    els.authMessage.textContent = payload.error || 'Password change failed.';
+    return;
+  }
+  els.changePasswordSection.hidden = true;
+  await initializeApp();
+});
+
+initializeApp().catch((error) => console.error(error));
+
+els.applicantRows.addEventListener('change', async (event) => {
+  const checkbox = event.target.closest('input[type="checkbox"][data-contacted-id]');
+  if (!checkbox) return;
+  const id = checkbox.getAttribute('data-contacted-id');
+  const contacted = checkbox.checked;
+  checkbox.disabled = true;
+  try {
+    const response = await fetch(`/api/applicants/${id}/contacted`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contacted })
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || 'Failed to update contacted status');
+  } catch (err) {
+    checkbox.checked = !contacted;
+    alert(err.message || String(err));
+  } finally {
+    checkbox.disabled = false;
   }
 });
