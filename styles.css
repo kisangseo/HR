@@ -108,3 +108,34 @@ th, td {
   white-space: pre-wrap;
   font-size: 12px;
 }
+
+
+.date-filter {
+  position: relative;
+}
+
+.date-picker-anchor {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  padding: 0;
+  border: 0;
+  pointer-events: none;
+}
+
+
+.action-buttons { display:flex; gap:0.4rem; }
+.small-btn { padding:0.25rem 0.5rem; font-size:0.8rem; }
+.small-btn.danger { background:#8b1f1f; color:#fff; border:1px solid #8b1f1f; }
+
+
+tbody tr:nth-child(even) {
+  background: #f7f9fc;
+}
+
+tbody tr:hover {
+  background: #eef4ff;
+}
