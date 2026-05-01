@@ -45,10 +45,15 @@
 
       <section class="panel">
         <h2>Applicants</h2>
+        <div class="bulk-actions">
+          <button id="denySelectedBtn" type="button" class="danger">Deny All</button>
+          <button id="undoDeniedSelectedBtn" type="button">Undo Denial All</button>
+        </div>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
+                <th><input type="checkbox" id="selectAllVisible" aria-label="Select all visible rows" /></th>
                 <th>Name</th>
                 <th>Submission Date</th>
                 <th>Primary Position</th>
