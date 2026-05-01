@@ -1,5 +1,6 @@
 const state = {
-  applicants: []
+  applicants: [],
+  selectedIds: new Set()
 };
 
 const els = {
@@ -9,7 +10,9 @@ const els = {
   jobTitleFilter: document.getElementById('jobTitleFilter'),
   statusFilter: document.getElementById('statusFilter'),
   clearFiltersBtn: document.getElementById('clearFiltersBtn'),
-  applicantRows: document.getElementById('applicantRows')
+  applicantRows: document.getElementById('applicantRows'),
+  selectAllVisible: document.getElementById('selectAllVisible'),
+  denySelectedBtn: document.getElementById('denySelectedBtn')
 };
 
 const dateRangeState = {
@@ -22,6 +25,8 @@ els.dateRangeFilter.addEventListener('click', openDatePicker);
 els.datePicker.addEventListener('change', handleDateSelection);
 els.jobTitleFilter.addEventListener('change', loadApplicants);
 els.statusFilter.addEventListener('change', loadApplicants);
+els.selectAllVisible.addEventListener('change', toggleSelectAllVisible);
+els.denySelectedBtn.addEventListener('click', denySelectedApplicants);
 
 els.clearFiltersBtn.addEventListener('click', () => {
   els.nameFilter.value = '';
@@ -97,8 +102,10 @@ async function loadApplicants() {
 }
 
 function renderTable(applicants) {
+  syncSelectionWithVisibleRows(applicants);
+  updateBulkActionUi();
   if (!applicants.length) {
-    els.applicantRows.innerHTML = '<tr><td colspan="10">No applicants found.</td></tr>';
+    els.applicantRows.innerHTML = '<tr><td colspan="11">No applicants found.</td></tr>';
     return;
   }
 
@@ -112,6 +119,7 @@ function renderTable(applicants) {
             .join(', ')
         : '—';
       return `<tr>
+        <td><input type="checkbox" data-select-id="${applicant.id}" ${state.selectedIds.has(applicant.id) ? 'checked' : ''} /></td>
         <td>${escapeHtml(applicant.name)}</td>
         <td>${formatDate(applicant.submittedAt)}</td>
         <td>${escapeHtml(primary)}</td>
@@ -125,6 +133,49 @@ function renderTable(applicants) {
       </tr>`;
     })
     .join('');
+}
+
+function syncSelectionWithVisibleRows(applicants) {
+  const visible = new Set(applicants.map((item) => item.id));
+  state.selectedIds = new Set([...state.selectedIds].filter((id) => visible.has(id)));
+}
+
+function updateBulkActionUi() {
+  const visibleIds = state.applicants.map((item) => item.id);
+  const selectedVisibleCount = visibleIds.filter((id) => state.selectedIds.has(id)).length;
+  els.selectAllVisible.checked = visibleIds.length > 0 && selectedVisibleCount === visibleIds.length;
+  els.selectAllVisible.indeterminate = selectedVisibleCount > 0 && selectedVisibleCount < visibleIds.length;
+  els.denySelectedBtn.disabled = selectedVisibleCount === 0;
+}
+
+function toggleSelectAllVisible() {
+  if (els.selectAllVisible.checked) {
+    state.applicants.forEach((item) => state.selectedIds.add(item.id));
+  } else {
+    state.applicants.forEach((item) => state.selectedIds.delete(item.id));
+  }
+  renderTable(state.applicants);
+}
+
+async function denySelectedApplicants() {
+  const visibleIds = state.applicants.map((item) => item.id).filter((id) => state.selectedIds.has(id));
+  if (!visibleIds.length) return;
+  if (!window.confirm(`Deny ${visibleIds.length} selected applicant(s)?`)) return;
+  els.denySelectedBtn.disabled = true;
+  try {
+    const response = await fetch('/api/applicants/deny', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: visibleIds })
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || 'Failed to deny selected applicants');
+    await loadApplicants();
+  } catch (err) {
+    alert(err.message || String(err));
+  } finally {
+    updateBulkActionUi();
+  }
 }
 
 
@@ -263,6 +314,14 @@ els.applicantRows.addEventListener('click', async (event) => {
 });
 
 els.applicantRows.addEventListener('change', async (event) => {
+  const selectCheckbox = event.target.closest('input[type="checkbox"][data-select-id]');
+  if (selectCheckbox) {
+    const id = Number(selectCheckbox.getAttribute('data-select-id'));
+    if (selectCheckbox.checked) state.selectedIds.add(id);
+    else state.selectedIds.delete(id);
+    updateBulkActionUi();
+    return;
+  }
   const checkbox = event.target.closest('input[type="checkbox"][data-contacted-id]');
   if (!checkbox) return;
   const id = checkbox.getAttribute('data-contacted-id');

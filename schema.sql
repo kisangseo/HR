@@ -14,11 +14,19 @@ BEGIN
     primary_position NVARCHAR(255) NOT NULL,
     other_positions NVARCHAR(MAX) NOT NULL CONSTRAINT DF_job_applications_other_positions DEFAULT (N'[]'),
     status NVARCHAR(100) NOT NULL CONSTRAINT DF_job_applications_status DEFAULT (N'interest_submitted'),
+    denied BIT NOT NULL CONSTRAINT DF_job_applications_denied DEFAULT ((0)),
     source NVARCHAR(100) NOT NULL CONSTRAINT DF_job_applications_source DEFAULT (N'csv'),
     raw_payload NVARCHAR(MAX) NULL,
     created_at DATETIME2(0) NOT NULL CONSTRAINT DF_job_applications_created_at DEFAULT (SYSUTCDATETIME()),
     updated_at DATETIME2(0) NOT NULL CONSTRAINT DF_job_applications_updated_at DEFAULT (SYSUTCDATETIME())
   );
+END;
+GO
+
+IF COL_LENGTH('dbo.job_applications', 'denied') IS NULL
+BEGIN
+  ALTER TABLE dbo.job_applications
+    ADD denied BIT NOT NULL CONSTRAINT DF_job_applications_denied DEFAULT ((0));
 END;
 GO
 
