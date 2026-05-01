@@ -225,21 +225,6 @@ async function loadStatuses() {
 Promise.all([loadJobTitles(), loadStatuses(), loadApplicants()]).catch((error) => console.error(error));
 
 
-function getReviewerContext() {
-  let email = localStorage.getItem('hrReviewerEmail') || '';
-  let permission = localStorage.getItem('hrReviewerPermission') || '';
-  if (!email) {
-    email = window.prompt('Enter your HR email for approve/deny actions:') || '';
-    if (!email.trim()) return null;
-    localStorage.setItem('hrReviewerEmail', email.trim());
-  }
-  if (!permission) {
-    permission = (window.prompt('Enter your permission (admin/edit/supervisor):') || '').toLowerCase().trim();
-    if (!permission) return null;
-    localStorage.setItem('hrReviewerPermission', permission);
-  }
-  return { email: email.trim(), permission: permission.trim() };
-}
 
 function renderActionCell(applicant) {
   const status = String(applicant.status || '').toLowerCase();
@@ -262,21 +247,10 @@ els.applicantRows.addEventListener('click', async (event) => {
   if (!btn) return;
   const action = btn.getAttribute('data-action');
   const id = btn.getAttribute('data-id');
-  const applicantEmail = btn.getAttribute('data-email') || 'this applicant';
-  const ok = window.confirm(`Are you sure you want to ${action} and send ${action} email to ${applicantEmail}?`);
-  if (!ok) return;
-
-  const reviewer = getReviewerContext();
-  if (!reviewer) return;
-
   btn.disabled = true;
   try {
     const response = await fetch(`/api/applicants/${id}/${action}`, {
       method: 'POST',
-      headers: {
-        'X-User-Email': reviewer.email,
-        'X-User-Permission': reviewer.permission
-      }
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || 'Action failed');
