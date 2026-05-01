@@ -1007,31 +1007,26 @@ def _is_allowed_approver(permission: str) -> bool:
     return (permission or "").strip().lower() in APPROVER_PERMISSIONS
 
 
-def _approve_or_deny_application(application_id: int, action: str, actor_email: str) -> None:
+def _approve_or_deny_application(application_id: int, action: str) -> None:
     action_value = (action or "").strip().lower()
     if action_value not in {"approve", "deny"}:
         raise ValueError("Unsupported action.")
     if action_value == "approve":
-        sql = """
-        UPDATE dbo.job_applications
-        SET status = 'Background Check Sent',
-            hr_decision = 'approved',
-            approved_by = ?,
-            approved_at = SYSUTCDATETIME()
-        WHERE id = ?
-        """
+        new_status = "Needs Approval - Approved"
+    elif action_value == "deny":
+        new_status = "Needs Approval - Denied"
     else:
-        sql = """
-        UPDATE dbo.job_applications
-        SET status = 'Denied',
-            hr_decision = 'denied',
-            denied_by = ?,
-            denied_at = SYSUTCDATETIME()
-        WHERE id = ?
-        """
+        raise ValueError("Unsupported action.")
     with get_sql_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(sql, (actor_email, application_id))
+        cursor.execute(
+            """
+            UPDATE dbo.job_applications
+            SET status = ?
+            WHERE id = ?
+            """,
+            (new_status, application_id),
+        )
         conn.commit()
 
 
@@ -1209,14 +1204,13 @@ def app(environ, start_response):
         if applicant_action_match:
             if not current_user:
                 return _wsgi_json(start_response, {"error": "Unauthorized"}, 401)
-            actor_email = str(current_user.get("email") or "")
             actor_permission = str(current_user.get("permission") or "")
             if not _is_allowed_approver(actor_permission):
                 return _wsgi_json(start_response, {"error": "Forbidden."}, 403)
             app_id = int(applicant_action_match.group(1))
             action = applicant_action_match.group(2)
             try:
-                _approve_or_deny_application(app_id, action, actor_email)
+                _approve_or_deny_application(app_id, action)
                 return _wsgi_json(start_response, {"ok": True, "id": app_id, "action": action})
             except Exception as exc:
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
@@ -1476,7 +1470,6 @@ class Handler(BaseHTTPRequestHandler):
             if not current_user:
                 self._send_json({"error": "Unauthorized"}, 401)
                 return
-            actor_email = str(current_user.get("email") or "")
             actor_permission = str(current_user.get("permission") or "")
             if not _is_allowed_approver(actor_permission):
                 self._send_json({"error": "Forbidden."}, 403)
@@ -1484,7 +1477,7 @@ class Handler(BaseHTTPRequestHandler):
             app_id = int(applicant_action_match.group(1))
             action = applicant_action_match.group(2)
             try:
-                _approve_or_deny_application(app_id, action, actor_email)
+                _approve_or_deny_application(app_id, action)
                 self._send_json({"ok": True, "id": app_id, "action": action})
             except Exception as exc:
                 self._send_json({"error": str(exc)}, 500)
