@@ -1061,6 +1061,7 @@ def _undo_denial(application_id: int) -> None:
             (application_id,),
         )
         conn.commit()
+        return int(cursor.rowcount or 0)
 
 
 def _undo_denials(application_ids: list[int]) -> int:
