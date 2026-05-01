@@ -1061,6 +1061,20 @@ def _undo_denial(application_id: int) -> None:
             (application_id,),
         )
         conn.commit()
+
+
+def _undo_denials(application_ids: list[int]) -> int:
+    ids = sorted({int(value) for value in application_ids if int(value) > 0})
+    if not ids:
+        return 0
+    placeholders = ",".join("?" for _ in ids)
+    with get_sql_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"UPDATE dbo.job_applications SET denied = 0 WHERE id IN ({placeholders})",
+            ids,
+        )
+        conn.commit()
         return int(cursor.rowcount or 0)
 
 
@@ -1192,6 +1206,20 @@ def app(environ, start_response):
         return _wsgi_json(start_response, {"error": "Not Found"}, 404)
 
     if method == "POST":
+        if path == "/api/applicants/undo-denial":
+            try:
+                payload = parse_json_body(body_text or "{}")
+            except Exception:
+                return _wsgi_json(start_response, {"error": "Invalid JSON payload."}, 400)
+            ids = payload.get("ids") if isinstance(payload, dict) else []
+            if not isinstance(ids, list):
+                return _wsgi_json(start_response, {"error": "Expected 'ids' array."}, 400)
+            try:
+                restored_count = _undo_denials([int(value) for value in ids])
+                return _wsgi_json(start_response, {"ok": True, "restored_count": restored_count})
+            except Exception as exc:
+                return _wsgi_json(start_response, {"error": str(exc)}, 500)
+
         if path == "/api/applicants/deny":
             try:
                 payload = parse_json_body(body_text or "{}")
@@ -1445,6 +1473,24 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 denied_count = _deny_applications([int(value) for value in ids])
                 self._send_json({"ok": True, "denied_count": denied_count})
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, 500)
+            return
+        if parsed.path == "/api/applicants/undo-denial":
+            content_length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(content_length).decode("utf-8")
+            try:
+                payload = parse_json_body(body or "{}")
+            except Exception:
+                self._send_json({"error": "Invalid JSON payload."}, 400)
+                return
+            ids = payload.get("ids") if isinstance(payload, dict) else []
+            if not isinstance(ids, list):
+                self._send_json({"error": "Expected 'ids' array."}, 400)
+                return
+            try:
+                restored_count = _undo_denials([int(value) for value in ids])
+                self._send_json({"ok": True, "restored_count": restored_count})
             except Exception as exc:
                 self._send_json({"error": str(exc)}, 500)
             return

@@ -12,7 +12,8 @@ const els = {
   clearFiltersBtn: document.getElementById('clearFiltersBtn'),
   applicantRows: document.getElementById('applicantRows'),
   selectAllVisible: document.getElementById('selectAllVisible'),
-  denySelectedBtn: document.getElementById('denySelectedBtn')
+  denySelectedBtn: document.getElementById('denySelectedBtn'),
+  undoDeniedSelectedBtn: document.getElementById('undoDeniedSelectedBtn')
 };
 
 const dateRangeState = {
@@ -27,6 +28,7 @@ els.jobTitleFilter.addEventListener('change', loadApplicants);
 els.statusFilter.addEventListener('change', loadApplicants);
 els.selectAllVisible.addEventListener('change', toggleSelectAllVisible);
 els.denySelectedBtn.addEventListener('click', denySelectedApplicants);
+els.undoDeniedSelectedBtn.addEventListener('click', undoDeniedSelectedApplicants);
 
 els.clearFiltersBtn.addEventListener('click', () => {
   els.nameFilter.value = '';
@@ -143,9 +145,12 @@ function syncSelectionWithVisibleRows(applicants) {
 function updateBulkActionUi() {
   const visibleIds = state.applicants.map((item) => item.id);
   const selectedVisibleCount = visibleIds.filter((id) => state.selectedIds.has(id)).length;
+  const isDeniedView = String(els.statusFilter.value || '').trim().toLowerCase() === 'denied';
   els.selectAllVisible.checked = visibleIds.length > 0 && selectedVisibleCount === visibleIds.length;
   els.selectAllVisible.indeterminate = selectedVisibleCount > 0 && selectedVisibleCount < visibleIds.length;
   els.denySelectedBtn.disabled = selectedVisibleCount === 0;
+  els.undoDeniedSelectedBtn.style.display = isDeniedView ? 'inline-block' : 'none';
+  els.undoDeniedSelectedBtn.disabled = !isDeniedView || selectedVisibleCount === 0;
 }
 
 function toggleSelectAllVisible() {
@@ -170,6 +175,26 @@ async function denySelectedApplicants() {
     });
     const payload = await readJsonResponse(response, 'Failed to deny selected applicants');
     if (!response.ok) throw new Error(payload.error || 'Failed to deny selected applicants');
+    await loadApplicants();
+  } catch (err) {
+    alert(err.message || String(err));
+  } finally {
+    updateBulkActionUi();
+  }
+}
+
+async function undoDeniedSelectedApplicants() {
+  const visibleIds = state.applicants.map((item) => item.id).filter((id) => state.selectedIds.has(id));
+  if (!visibleIds.length) return;
+  if (!window.confirm(`Undo denial for ${visibleIds.length} selected applicant(s)?`)) return;
+  els.undoDeniedSelectedBtn.disabled = true;
+  try {
+    const response = await fetch('/api/applicants/undo-denial', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: visibleIds })
+    });
+    await readJsonResponse(response, 'Failed to undo denial for selected applicants');
     await loadApplicants();
   } catch (err) {
     alert(err.message || String(err));
