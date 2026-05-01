@@ -67,6 +67,15 @@ button:hover {
 .actions {
   margin-top: 12px;
 }
+.bulk-actions {
+  margin-bottom: 10px;
+}
+.danger {
+  background: #8b1f1f;
+}
+.danger:hover {
+  background: #761919;
+}
 
 .table-wrap {
   overflow: auto;
