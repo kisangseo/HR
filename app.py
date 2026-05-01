@@ -6,6 +6,9 @@ import json
 import logging
 import os
 import re
+
+import msal
+import requests
 from collections import Counter
 from datetime import datetime, timezone
 from io import BytesIO
@@ -25,6 +28,10 @@ MAKE_WEBHOOK_TOKEN = os.getenv("HR_MAKE_WEBHOOK_TOKEN", "").strip()
 RUN_INGEST_TOKEN = os.getenv("HR_RUN_INGEST_TOKEN", "").strip()
 SERVER_HOST = os.getenv("HR_HOST", "127.0.0.1").strip() or "127.0.0.1"
 SERVER_PORT = int(os.getenv("PORT") or os.getenv("HR_PORT") or "8000")
+CLIENT_ID = os.getenv("CLIENT_ID", "").strip()
+CLIENT_SECRET = os.getenv("CLIENT_SECRET", "").strip()
+TENANT_ID = os.getenv("TENANT_ID", "").strip()
+MAILBOX_EMAIL = os.getenv("MAILBOX_EMAIL", "").strip()
 
 INDEX_HTML = ROOT / "index.html"
 STATIC_JS = ROOT / "app.js"
@@ -1005,33 +1012,106 @@ def query_statuses() -> list[str]:
         output.append("Denied")
     return sorted(output, key=lambda value: value.lower())
 
+def send_graph_email(to_email: str, subject: str, html_body: str) -> None:
+    if not CLIENT_ID or not CLIENT_SECRET or not TENANT_ID or not MAILBOX_EMAIL:
+        raise RuntimeError("Missing Graph email configuration. Set CLIENT_ID, CLIENT_SECRET, TENANT_ID, and MAILBOX_EMAIL.")
+    authority = f"https://login.microsoftonline.com/{TENANT_ID}"
+    app = msal.ConfidentialClientApplication(
+        CLIENT_ID,
+        authority=authority,
+        client_credential=CLIENT_SECRET,
+    )
+    token_result = app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
+    access_token = token_result.get("access_token")
+    if not access_token:
+        description = token_result.get("error_description") or token_result.get("error") or "unknown error"
+        raise RuntimeError(f"Failed to obtain Microsoft Graph token: {description}")
+
+    endpoint = f"https://graph.microsoft.com/v1.0/users/{MAILBOX_EMAIL}/sendMail"
+    payload = {
+        "message": {
+            "subject": subject,
+            "body": {"contentType": "HTML", "content": html_body},
+            "toRecipients": [{"emailAddress": {"address": to_email}}],
+        },
+        "saveToSentItems": "true",
+    }
+    response = requests.post(
+        endpoint,
+        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=20,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"Failed to send email via Microsoft Graph: {response.status_code} {response.text[:300]}")
+
+
 def _approve_or_deny_application(application_id: int, action: str) -> None:
     action_value = (action or "").strip().lower()
-    if action_value == "approve":
-        new_status = "Needs Approval - Approved"
-        sql = """
-            UPDATE dbo.job_applications
-            SET status = ?,
-                denied = 0
-            WHERE id = ?
-        """
-    elif action_value == "deny":
-        new_status = None
-        sql = """
-            UPDATE dbo.job_applications
-            SET denied = 1
-            WHERE id = ?
-        """
-    else:
+    if action_value not in {"approve", "deny"}:
         raise ValueError("Unsupported action.")
 
     with get_sql_connection() as conn:
         cursor = conn.cursor()
+        row = cursor.execute(
+            "SELECT email, status FROM dbo.job_applications WHERE id = ?",
+            (application_id,),
+        ).fetchone()
+        if not row:
+            raise ValueError("Applicant not found.")
+
+        to_email = (row[0] or "").strip()
+        current_status = normalize_status_label(row[1])
+
         if action_value == "approve":
-            cursor.execute(sql, (new_status, application_id))
+            if current_status != "Needs Approval":
+                raise ValueError("Approve action is only available for applicants in 'Needs Approval' status.")
+            cursor.execute(
+                """
+                UPDATE dbo.job_applications
+                SET status = ?,
+                    denied = 0
+                WHERE id = ?
+                """,
+                ("Needs Approval - Approved", application_id),
+            )
+            email_subject = "Background Check Form"
+            email_body = (
+                "<p>Your application has been approved for the next step.</p>"
+                "<p>Please complete the background check form here: "
+                '<a href="https://www.cognitoforms.com/BaltimoreCitySheriffsOffice3/BaltimoreCitySheriffsOffice">'
+                "https://www.cognitoforms.com/BaltimoreCitySheriffsOffice3/BaltimoreCitySheriffsOffice"
+                "</a></p>"
+            )
         else:
-            cursor.execute(sql, (application_id,))
+            if current_status == "Needs Approval":
+                cursor.execute(
+                    """
+                    UPDATE dbo.job_applications
+                    SET status = ?, denied = 1
+                    WHERE id = ?
+                    """,
+                    ("Needs Approval - Denied", application_id),
+                )
+            else:
+                cursor.execute(
+                    """
+                    UPDATE dbo.job_applications
+                    SET status = ?, denied = 1
+                    WHERE id = ?
+                    """,
+                    ("Denied", application_id),
+                )
+            email_subject = "Application Update"
+            email_body = "<p>Thank you for your interest. At this time, your application has not been selected to move forward.</p>"
+
+        if int(cursor.rowcount or 0) <= 0:
+            raise RuntimeError("No rows were updated.")
         conn.commit()
+
+    if not to_email:
+        raise RuntimeError("Applicant email is missing; status was updated but no email was sent.")
+    send_graph_email(to_email, email_subject, email_body)
 
 
 def _deny_applications(application_ids: list[int]) -> int:
