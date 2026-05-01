@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import secrets
 from collections import Counter
 from datetime import datetime, timezone
 from io import BytesIO
@@ -31,6 +32,8 @@ STATIC_JS = ROOT / "app.js"
 STATIC_CSS = ROOT / "styles.css"
 
 APPROVER_PERMISSIONS = {"admin", "edit", "supervisor"}
+SESSION_COOKIE_NAME = "hr_session"
+SESSION_STORE: dict[str, dict[str, Any]] = {}
 
 ALIASES = {
     "first_name": ["first name", "first_name", "firstname", "name first"],
@@ -829,7 +832,7 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
     sql = """
         SELECT
             id, submitted_at, full_name, email, phone,
-            primary_position, other_positions, status, source, cognito_pdf_url, cognito_document_link, background_pdf_url, background_document_url, resume_file_url
+            primary_position, other_positions, status, source, cognito_pdf_url, cognito_document_link, background_pdf_url, background_document_url, resume_file_url, contacted
         FROM dbo.job_applications
         WHERE 1 = 1
     """
@@ -865,7 +868,7 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
                 WHEN status = 'Needs Approval' THEN 2
                 ELSE 3
             END,
-            submitted_at DESC
+            submitted_at ASC
         """
 
     with get_sql_connection() as conn:
@@ -902,6 +905,7 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
                 "cognitoPdfUrl": row[9],
                 "cognitoDocumentLink": row[10],
                 "documents": build_document_links(row[9], row[10], row[11], row[12], row[13]),
+                "contacted": bool(row[14]) if row[14] is not None else False,
             }
         )
     # Smart presentation layer:
@@ -1031,6 +1035,77 @@ def _approve_or_deny_application(application_id: int, action: str, actor_email: 
         conn.commit()
 
 
+def _set_contacted(application_id: int, contacted: bool) -> None:
+    with get_sql_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE dbo.job_applications
+            SET contacted = ?
+            WHERE id = ?
+            """,
+            1 if contacted else 0,
+            application_id,
+        )
+        conn.commit()
+
+
+def _query_user_by_email(email: str) -> dict[str, Any] | None:
+    with get_sql_connection() as conn:
+        cursor = conn.cursor()
+        row = cursor.execute(
+            """
+            SELECT user_id, email, password_hash, must_change_password, is_active, permission
+            FROM search.users
+            WHERE LOWER(email) = LOWER(?)
+            """,
+            email,
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "user_id": int(row[0]),
+        "email": str(row[1] or "").strip(),
+        "password_hash": str(row[2] or ""),
+        "must_change_password": bool(row[3]),
+        "is_active": bool(row[4]),
+        "permission": str(row[5] or "").strip().lower(),
+    }
+
+
+def _update_user_password(user_id: int, new_password: str) -> None:
+    with get_sql_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE search.users
+            SET password_hash = ?, must_change_password = 0
+            WHERE user_id = ?
+            """,
+            new_password,
+            user_id,
+        )
+        conn.commit()
+
+
+def _extract_cookie_value(cookie_header: str, key: str) -> str:
+    for part in (cookie_header or "").split(";"):
+        name, _, value = part.strip().partition("=")
+        if name == key:
+            return value.strip()
+    return ""
+
+
+def _session_user_from_cookie(cookie_header: str) -> dict[str, Any] | None:
+    token = _extract_cookie_value(cookie_header, SESSION_COOKIE_NAME)
+    if not token:
+        return None
+    session = SESSION_STORE.get(token)
+    if not session:
+        return None
+    return dict(session)
+
+
 def run_email_ingest(scan_limit: int, source_folder: str = "all") -> dict[str, Any]:
     from email_ingest import run_ingest
 
@@ -1049,15 +1124,15 @@ def _http_status(code: int) -> str:
     return f"{code} {phrases.get(code, 'OK')}"
 
 
-def _wsgi_json(start_response, payload: Any, code: int = 200):
+def _wsgi_json(start_response, payload: Any, code: int = 200, headers: list[tuple[str, str]] | None = None):
     body = json.dumps(payload).encode("utf-8")
-    start_response(
-        _http_status(code),
-        [
-            ("Content-Type", "application/json"),
-            ("Content-Length", str(len(body))),
-        ],
-    )
+    response_headers = [
+        ("Content-Type", "application/json"),
+        ("Content-Length", str(len(body))),
+    ]
+    if headers:
+        response_headers.extend(headers)
+    start_response(_http_status(code), response_headers)
     return [body]
 
 
@@ -1088,6 +1163,7 @@ def app(environ, start_response):
     body_text = ""
     if content_length > 0:
         body_text = (environ.get("wsgi.input") or BytesIO()).read(content_length).decode("utf-8")
+    current_user = _session_user_from_cookie(environ.get("HTTP_COOKIE", ""))
 
     if method == "GET":
         if path == "/":
@@ -1096,6 +1172,10 @@ def app(environ, start_response):
             return _wsgi_file(start_response, STATIC_JS, "text/javascript; charset=utf-8")
         if path == "/styles.css":
             return _wsgi_file(start_response, STATIC_CSS, "text/css; charset=utf-8")
+        if path == "/api/me":
+            if not current_user:
+                return _wsgi_json(start_response, {"authenticated": False}, 401)
+            return _wsgi_json(start_response, {"authenticated": True, "user": current_user})
         if path == "/api/version":
             return _wsgi_json(start_response, {"app_version": APP_VERSION, "db_backend": "sqlserver"})
         if path == "/run-ingest":
@@ -1117,6 +1197,8 @@ def app(environ, start_response):
                 logging.exception("/run-ingest failed source_folder=%s scan_limit=%s", source_folder, scan_limit)
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
         if path == "/api/applicants":
+            if not current_user:
+                return _wsgi_json(start_response, {"error": "Unauthorized"}, 401)
             filters = {
                 "name": (query.get("name") or [""])[0],
                 "job_title": (query.get("job_title") or [""])[0],
@@ -1130,12 +1212,16 @@ def app(environ, start_response):
             except Exception as exc:
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
         if path == "/api/job-titles":
+            if not current_user:
+                return _wsgi_json(start_response, {"error": "Unauthorized"}, 401)
             try:
                 titles = query_job_titles()
                 return _wsgi_json(start_response, {"job_titles": titles})
             except Exception as exc:
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
         if path == "/api/statuses":
+            if not current_user:
+                return _wsgi_json(start_response, {"error": "Unauthorized"}, 401)
             try:
                 statuses = query_statuses()
                 return _wsgi_json(start_response, {"statuses": statuses})
@@ -1144,12 +1230,41 @@ def app(environ, start_response):
         return _wsgi_json(start_response, {"error": "Not Found"}, 404)
 
     if method == "POST":
+        if path == "/api/login":
+            try:
+                payload = parse_json_body(body_text or "{}")
+            except Exception:
+                return _wsgi_json(start_response, {"error": "Invalid JSON payload."}, 400)
+            email = str(payload.get("email") or "").strip()
+            password = str(payload.get("password") or "")
+            user = _query_user_by_email(email)
+            if not user or not user["is_active"] or user["password_hash"] != password:
+                return _wsgi_json(start_response, {"error": "Invalid credentials."}, 401)
+            token = secrets.token_urlsafe(32)
+            SESSION_STORE[token] = {"user_id": user["user_id"], "email": user["email"], "permission": user["permission"], "must_change_password": user["must_change_password"]}
+            return _wsgi_json(start_response, {"ok": True, "must_change_password": user["must_change_password"]}, headers=[("Set-Cookie", f"{SESSION_COOKIE_NAME}={token}; HttpOnly; Path=/; SameSite=Lax")])
+        if path == "/api/logout":
+            token = _extract_cookie_value(environ.get("HTTP_COOKIE", ""), SESSION_COOKIE_NAME)
+            if token:
+                SESSION_STORE.pop(token, None)
+            return _wsgi_json(start_response, {"ok": True}, headers=[("Set-Cookie", f"{SESSION_COOKIE_NAME}=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax")])
+        if path == "/api/change-password":
+            if not current_user:
+                return _wsgi_json(start_response, {"error": "Unauthorized"}, 401)
+            payload = parse_json_body(body_text or "{}")
+            new_password = str(payload.get("new_password") or "")
+            _update_user_password(int(current_user["user_id"]), new_password)
+            token = _extract_cookie_value(environ.get("HTTP_COOKIE", ""), SESSION_COOKIE_NAME)
+            if token in SESSION_STORE:
+                SESSION_STORE[token]["must_change_password"] = False
+            return _wsgi_json(start_response, {"ok": True})
+
         applicant_action_match = re.fullmatch(r"/api/applicants/(\d+)/(approve|deny)", path or "")
         if applicant_action_match:
-            actor_email = (environ.get("HTTP_X_USER_EMAIL", "") or "").strip()
-            actor_permission = (environ.get("HTTP_X_USER_PERMISSION", "") or "").strip()
-            if not actor_email:
-                return _wsgi_json(start_response, {"error": "Missing X-User-Email."}, 400)
+            if not current_user:
+                return _wsgi_json(start_response, {"error": "Unauthorized"}, 401)
+            actor_email = str(current_user.get("email") or "")
+            actor_permission = str(current_user.get("permission") or "")
             if not _is_allowed_approver(actor_permission):
                 return _wsgi_json(start_response, {"error": "Forbidden."}, 403)
             app_id = int(applicant_action_match.group(1))
@@ -1157,6 +1272,24 @@ def app(environ, start_response):
             try:
                 _approve_or_deny_application(app_id, action, actor_email)
                 return _wsgi_json(start_response, {"ok": True, "id": app_id, "action": action})
+            except Exception as exc:
+                return _wsgi_json(start_response, {"error": str(exc)}, 500)
+
+        applicant_contacted_match = re.fullmatch(r"/api/applicants/(\d+)/contacted", path or "")
+        if applicant_contacted_match:
+            if not current_user:
+                return _wsgi_json(start_response, {"error": "Unauthorized"}, 401)
+            if not _is_allowed_approver(str(current_user.get("permission") or "")):
+                return _wsgi_json(start_response, {"error": "Forbidden."}, 403)
+            app_id = int(applicant_contacted_match.group(1))
+            try:
+                payload = parse_json_body(body_text or "{}")
+            except Exception:
+                return _wsgi_json(start_response, {"error": "Invalid JSON payload."}, 400)
+            contacted = bool(payload.get("contacted"))
+            try:
+                _set_contacted(app_id, contacted)
+                return _wsgi_json(start_response, {"ok": True, "id": app_id, "contacted": contacted})
             except Exception as exc:
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
 
@@ -1269,6 +1402,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        current_user = _session_user_from_cookie(self.headers.get("Cookie", ""))
 
         if parsed.path == "/":
             self._send_file(INDEX_HTML, "text/html; charset=utf-8")
@@ -1283,6 +1417,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/applicants":
+            if not current_user:
+                self._send_json({"error": "Unauthorized"}, 401)
+                return
             query = parse_qs(parsed.query)
             filters = {
                 "name": (query.get("name") or [""])[0],
@@ -1299,6 +1436,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/job-titles":
+            if not current_user:
+                self._send_json({"error": "Unauthorized"}, 401)
+                return
             try:
                 self._send_json({"job_titles": query_job_titles()})
             except Exception as exc:
@@ -1306,10 +1446,20 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/statuses":
+            if not current_user:
+                self._send_json({"error": "Unauthorized"}, 401)
+                return
             try:
                 self._send_json({"statuses": query_statuses()})
             except Exception as exc:
                 self._send_json({"error": str(exc)}, 500)
+            return
+
+        if parsed.path == "/api/me":
+            if not current_user:
+                self._send_json({"authenticated": False}, 401)
+                return
+            self._send_json({"authenticated": True, "user": current_user})
             return
 
         if parsed.path == "/api/version":
@@ -1342,13 +1492,47 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        current_user = _session_user_from_cookie(self.headers.get("Cookie", ""))
+        if parsed.path == "/api/login":
+            content_length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(content_length).decode("utf-8")
+            payload = parse_json_body(body or "{}")
+            email = str(payload.get("email") or "").strip()
+            password = str(payload.get("password") or "")
+            user = _query_user_by_email(email)
+            if not user or not user["is_active"] or user["password_hash"] != password:
+                self._send_json({"error": "Invalid credentials."}, 401)
+                return
+            token = secrets.token_urlsafe(32)
+            SESSION_STORE[token] = {"user_id": user["user_id"], "email": user["email"], "permission": user["permission"], "must_change_password": user["must_change_password"]}
+            body_bytes = json.dumps({"ok": True, "must_change_password": user["must_change_password"]}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Set-Cookie", f"{SESSION_COOKIE_NAME}={token}; HttpOnly; Path=/; SameSite=Lax")
+            self.send_header("Content-Length", str(len(body_bytes)))
+            self.end_headers()
+            self.wfile.write(body_bytes)
+            return
+        if parsed.path == "/api/change-password":
+            if not current_user:
+                self._send_json({"error": "Unauthorized"}, 401)
+                return
+            content_length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(content_length).decode("utf-8")
+            payload = parse_json_body(body or "{}")
+            _update_user_password(int(current_user["user_id"]), str(payload.get("new_password") or ""))
+            token = _extract_cookie_value(self.headers.get("Cookie", ""), SESSION_COOKIE_NAME)
+            if token in SESSION_STORE:
+                SESSION_STORE[token]["must_change_password"] = False
+            self._send_json({"ok": True})
+            return
         applicant_action_match = re.fullmatch(r"/api/applicants/(\d+)/(approve|deny)", parsed.path or "")
         if applicant_action_match:
-            actor_email = (self.headers.get("X-User-Email", "") or "").strip()
-            actor_permission = (self.headers.get("X-User-Permission", "") or "").strip()
-            if not actor_email:
-                self._send_json({"error": "Missing X-User-Email."}, 400)
+            if not current_user:
+                self._send_json({"error": "Unauthorized"}, 401)
                 return
+            actor_email = str(current_user.get("email") or "")
+            actor_permission = str(current_user.get("permission") or "")
             if not _is_allowed_approver(actor_permission):
                 self._send_json({"error": "Forbidden."}, 403)
                 return
@@ -1357,6 +1541,26 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 _approve_or_deny_application(app_id, action, actor_email)
                 self._send_json({"ok": True, "id": app_id, "action": action})
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, 500)
+            return
+        applicant_contacted_match = re.fullmatch(r"/api/applicants/(\d+)/contacted", parsed.path or "")
+        if applicant_contacted_match:
+            if not current_user or not _is_allowed_approver(str(current_user.get("permission") or "")):
+                self._send_json({"error": "Forbidden."}, 403)
+                return
+            app_id = int(applicant_contacted_match.group(1))
+            content_length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(content_length).decode("utf-8")
+            try:
+                payload = parse_json_body(body or "{}")
+            except Exception:
+                self._send_json({"error": "Invalid JSON payload."}, 400)
+                return
+            contacted = bool(payload.get("contacted"))
+            try:
+                _set_contacted(app_id, contacted)
+                self._send_json({"ok": True, "id": app_id, "contacted": contacted})
             except Exception as exc:
                 self._send_json({"error": str(exc)}, 500)
             return
