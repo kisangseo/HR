@@ -1,5 +1,6 @@
 const state = {
-  applicants: []
+  applicants: [],
+  selectedIds: new Set()
 };
 
 const els = {
@@ -9,7 +10,9 @@ const els = {
   jobTitleFilter: document.getElementById('jobTitleFilter'),
   statusFilter: document.getElementById('statusFilter'),
   clearFiltersBtn: document.getElementById('clearFiltersBtn'),
-  applicantRows: document.getElementById('applicantRows')
+  applicantRows: document.getElementById('applicantRows'),
+  selectAllVisible: document.getElementById('selectAllVisible'),
+  denySelectedBtn: document.getElementById('denySelectedBtn')
 };
 
 const dateRangeState = {
@@ -22,6 +25,8 @@ els.dateRangeFilter.addEventListener('click', openDatePicker);
 els.datePicker.addEventListener('change', handleDateSelection);
 els.jobTitleFilter.addEventListener('change', loadApplicants);
 els.statusFilter.addEventListener('change', loadApplicants);
+els.selectAllVisible.addEventListener('change', toggleSelectAllVisible);
+els.denySelectedBtn.addEventListener('click', denySelectedApplicants);
 
 els.clearFiltersBtn.addEventListener('click', () => {
   els.nameFilter.value = '';
@@ -91,14 +96,16 @@ async function loadApplicants() {
   });
 
   const response = await fetch(`/api/applicants?${params.toString()}`);
-  const payload = await response.json();
+  const payload = await readJsonResponse(response, 'Failed to load applicants');
   state.applicants = payload.applicants || [];
   renderTable(state.applicants);
 }
 
 function renderTable(applicants) {
+  syncSelectionWithVisibleRows(applicants);
+  updateBulkActionUi();
   if (!applicants.length) {
-    els.applicantRows.innerHTML = '<tr><td colspan="10">No applicants found.</td></tr>';
+    els.applicantRows.innerHTML = '<tr><td colspan="11">No applicants found.</td></tr>';
     return;
   }
 
@@ -112,6 +119,7 @@ function renderTable(applicants) {
             .join(', ')
         : '—';
       return `<tr>
+        <td><input type="checkbox" data-select-id="${applicant.id}" ${state.selectedIds.has(applicant.id) ? 'checked' : ''} /></td>
         <td>${escapeHtml(applicant.name)}</td>
         <td>${formatDate(applicant.submittedAt)}</td>
         <td>${escapeHtml(primary)}</td>
@@ -125,6 +133,49 @@ function renderTable(applicants) {
       </tr>`;
     })
     .join('');
+}
+
+function syncSelectionWithVisibleRows(applicants) {
+  const visible = new Set(applicants.map((item) => item.id));
+  state.selectedIds = new Set([...state.selectedIds].filter((id) => visible.has(id)));
+}
+
+function updateBulkActionUi() {
+  const visibleIds = state.applicants.map((item) => item.id);
+  const selectedVisibleCount = visibleIds.filter((id) => state.selectedIds.has(id)).length;
+  els.selectAllVisible.checked = visibleIds.length > 0 && selectedVisibleCount === visibleIds.length;
+  els.selectAllVisible.indeterminate = selectedVisibleCount > 0 && selectedVisibleCount < visibleIds.length;
+  els.denySelectedBtn.disabled = selectedVisibleCount === 0;
+}
+
+function toggleSelectAllVisible() {
+  if (els.selectAllVisible.checked) {
+    state.applicants.forEach((item) => state.selectedIds.add(item.id));
+  } else {
+    state.applicants.forEach((item) => state.selectedIds.delete(item.id));
+  }
+  renderTable(state.applicants);
+}
+
+async function denySelectedApplicants() {
+  const visibleIds = state.applicants.map((item) => item.id).filter((id) => state.selectedIds.has(id));
+  if (!visibleIds.length) return;
+  if (!window.confirm(`Deny ${visibleIds.length} selected applicant(s)?`)) return;
+  els.denySelectedBtn.disabled = true;
+  try {
+    const response = await fetch('/api/applicants/deny', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: visibleIds })
+    });
+    const payload = await readJsonResponse(response, 'Failed to deny selected applicants');
+    if (!response.ok) throw new Error(payload.error || 'Failed to deny selected applicants');
+    await loadApplicants();
+  } catch (err) {
+    alert(err.message || String(err));
+  } finally {
+    updateBulkActionUi();
+  }
 }
 
 
@@ -191,7 +242,7 @@ function escapeHtml(value) {
 
 async function loadJobTitles() {
   const response = await fetch('/api/job-titles');
-  const payload = await response.json();
+  const payload = await readJsonResponse(response, 'Failed to load job titles');
   const titles = payload.job_titles || [];
   const existing = new Set(
     Array.from(els.jobTitleFilter.options).map((option) => option.value.toLowerCase())
@@ -209,7 +260,7 @@ async function loadJobTitles() {
 
 async function loadStatuses() {
   const response = await fetch('/api/statuses');
-  const payload = await response.json();
+  const payload = await readJsonResponse(response, 'Failed to load statuses');
   const statuses = payload.statuses || [];
   const existing = new Set(Array.from(els.statusFilter.options).map((option) => option.value.toLowerCase()));
   for (const status of statuses) {
@@ -223,6 +274,26 @@ async function loadStatuses() {
 }
 
 Promise.all([loadJobTitles(), loadStatuses(), loadApplicants()]).catch((error) => console.error(error));
+
+async function readJsonResponse(response, fallbackMessage) {
+  const contentType = response.headers.get('content-type') || '';
+  const bodyText = await response.text();
+  let payload = {};
+  if (bodyText && contentType.includes('application/json')) {
+    try {
+      payload = JSON.parse(bodyText);
+    } catch (error) {
+      throw new Error(`${fallbackMessage}: invalid JSON response`);
+    }
+  } else if (bodyText) {
+    const preview = bodyText.slice(0, 120).replace(/\s+/g, ' ').trim();
+    throw new Error(`${fallbackMessage}: server returned non-JSON response (${preview})`);
+  }
+  if (!response.ok) {
+    throw new Error(payload.error || fallbackMessage);
+  }
+  return payload;
+}
 
 
 
@@ -252,8 +323,7 @@ els.applicantRows.addEventListener('click', async (event) => {
     const response = await fetch(`/api/applicants/${id}/${action}`, {
       method: 'POST',
     });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || 'Action failed');
+    await readJsonResponse(response, 'Action failed');
     await loadApplicants();
   } catch (err) {
     alert(err.message || String(err));
@@ -263,6 +333,14 @@ els.applicantRows.addEventListener('click', async (event) => {
 });
 
 els.applicantRows.addEventListener('change', async (event) => {
+  const selectCheckbox = event.target.closest('input[type="checkbox"][data-select-id]');
+  if (selectCheckbox) {
+    const id = Number(selectCheckbox.getAttribute('data-select-id'));
+    if (selectCheckbox.checked) state.selectedIds.add(id);
+    else state.selectedIds.delete(id);
+    updateBulkActionUi();
+    return;
+  }
   const checkbox = event.target.closest('input[type="checkbox"][data-contacted-id]');
   if (!checkbox) return;
   const id = checkbox.getAttribute('data-contacted-id');
@@ -274,8 +352,7 @@ els.applicantRows.addEventListener('change', async (event) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ contacted })
     });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || 'Failed to update contacted status');
+    await readJsonResponse(response, 'Failed to update contacted status');
   } catch (err) {
     checkbox.checked = !contacted;
     alert(err.message || String(err));
