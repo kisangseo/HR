@@ -267,10 +267,6 @@ els.applicantRows.addEventListener('click', async (event) => {
   if (!btn) return;
   const action = btn.getAttribute('data-action');
   const id = btn.getAttribute('data-id');
-  const applicantEmail = btn.getAttribute('data-email') || 'this applicant';
-  const ok = window.confirm(`Are you sure you want to ${action} and send ${action} email to ${applicantEmail}?`);
-  if (!ok) return;
-
   btn.disabled = true;
   try {
     const response = await fetch(`/api/applicants/${id}/${action}`, {
