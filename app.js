@@ -287,20 +287,24 @@ els.applicantRows.addEventListener('click', async (event) => {
 });
 
 els.loginBtn.addEventListener('click', async () => {
-  const email = els.loginEmail.value.trim();
-  const password = els.loginPassword.value;
-  const response = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) });
-  const payload = await response.json();
-  if (!response.ok) {
-    els.authMessage.textContent = payload.error || 'Login failed.';
-    return;
+  try {
+    const email = els.loginEmail.value.trim();
+    const password = els.loginPassword.value;
+    const response = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      els.authMessage.textContent = payload.error || 'Login failed.';
+      return;
+    }
+    if (payload.must_change_password) {
+      els.changePasswordSection.hidden = false;
+      els.authMessage.textContent = 'Password change required.';
+      return;
+    }
+    await initializeApp();
+  } catch (error) {
+    els.authMessage.textContent = error?.message || 'Login failed.';
   }
-  if (payload.must_change_password) {
-    els.changePasswordSection.hidden = false;
-    els.authMessage.textContent = 'Password change required.';
-    return;
-  }
-  await initializeApp();
 });
 
 els.changePasswordBtn.addEventListener('click', async () => {
