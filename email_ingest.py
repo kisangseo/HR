@@ -391,20 +391,20 @@ def is_target_job_application(message: dict[str, Any]) -> bool:
     return sender_matches and SUBJECT_CONTAINS in subject
 
 
-def run_ingest(scan_limit: int, source_folder: str = "all") -> dict[str, int]:
+def run_ingest(scan_limit: int, source_folder: str = "inbox") -> dict[str, int]:
     if not MAILBOX_EMAIL:
         raise RuntimeError("MAILBOX_EMAIL is not set")
 
     token = get_access_token()
     processed_folder_id = get_processed_folder_id(token, MAILBOX_EMAIL)
-    source_folder_normalized = (source_folder or "all").strip().lower()
+    source_folder_normalized = (source_folder or "inbox").strip().lower()
     if source_folder_normalized == "inbox":
         folder_targets: list[tuple[str, str]] = [("inbox", "inbox")]
     elif source_folder_normalized == "processed":
         folder_targets = [("processed", processed_folder_id)]
     else:
-        source_folder_normalized = "all"
-        folder_targets = [("inbox", "inbox"), ("processed", processed_folder_id)]
+        source_folder_normalized = "inbox"
+        folder_targets = [("inbox", "inbox")]
 
     logging.info(
         "Email ingest config: mailbox=%s target_sender=%s sender_match_mode=%s subject_contains=%s scan_limit=%s",
@@ -479,7 +479,7 @@ def main() -> None:
     cli.add_argument(
         "--source-folder",
         choices=["all", "inbox", "processed"],
-        default="all",
+        default="inbox",
         help="Folder scope: all (inbox + processed), inbox only, or processed only.",
     )
     args = cli.parse_args()
