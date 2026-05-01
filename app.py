@@ -1061,6 +1061,7 @@ def _undo_denial(application_id: int) -> None:
             (application_id,),
         )
         conn.commit()
+        return int(cursor.rowcount or 0)
 
 
 def _undo_denials(application_ids: list[int]) -> int:
@@ -1139,7 +1140,8 @@ def _wsgi_file(start_response, path: Path, content_type: str):
 
 def app(environ, start_response):
     method = (environ.get("REQUEST_METHOD") or "GET").upper()
-    path = environ.get("PATH_INFO") or "/"
+    raw_path = environ.get("PATH_INFO") or "/"
+    path = raw_path.rstrip("/") or "/"
     query = parse_qs(environ.get("QUERY_STRING") or "")
 
     content_length_raw = environ.get("CONTENT_LENGTH", "0")
@@ -1243,12 +1245,15 @@ def app(environ, start_response):
             except Exception as exc:
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
 
-        applicant_action_match = re.fullmatch(r"/api/applicants/(\d+)/(approve|deny)", path or "")
+        applicant_action_match = re.fullmatch(r"/api/applicants/(\d+)/(approve|deny|undo-denial)", path or "")
         if applicant_action_match:
             app_id = int(applicant_action_match.group(1))
             action = applicant_action_match.group(2)
             try:
-                _approve_or_deny_application(app_id, action)
+                if action == "undo-denial":
+                    _undo_denial(app_id)
+                else:
+                    _approve_or_deny_application(app_id, action)
                 return _wsgi_json(start_response, {"ok": True, "id": app_id, "action": action})
             except Exception as exc:
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
@@ -1449,16 +1454,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
-        undo_denial_match = re.fullmatch(r"/api/applicants/(\d+)/undo-denial", parsed.path or "")
-        if undo_denial_match:
-            app_id = int(undo_denial_match.group(1))
-            try:
-                _undo_denial(app_id)
-                self._send_json({"ok": True, "id": app_id, "action": "undo-denial"})
-            except Exception as exc:
-                self._send_json({"error": str(exc)}, 500)
-            return
-        if parsed.path == "/api/applicants/deny":
+        normalized_path = (parsed.path or "/").rstrip("/") or "/"
+        if normalized_path == "/api/applicants/deny":
             content_length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(content_length).decode("utf-8")
             try:
@@ -1476,7 +1473,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send_json({"error": str(exc)}, 500)
             return
-        if parsed.path == "/api/applicants/undo-denial":
+        if normalized_path == "/api/applicants/undo-denial":
             content_length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(content_length).decode("utf-8")
             try:
@@ -1494,12 +1491,15 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send_json({"error": str(exc)}, 500)
             return
-        applicant_action_match = re.fullmatch(r"/api/applicants/(\d+)/(approve|deny)", parsed.path or "")
+        applicant_action_match = re.fullmatch(r"/api/applicants/(\d+)/(approve|deny|undo-denial)", normalized_path or "")
         if applicant_action_match:
             app_id = int(applicant_action_match.group(1))
             action = applicant_action_match.group(2)
             try:
-                _approve_or_deny_application(app_id, action)
+                if action == "undo-denial":
+                    _undo_denial(app_id)
+                else:
+                    _approve_or_deny_application(app_id, action)
                 self._send_json({"ok": True, "id": app_id, "action": action})
             except Exception as exc:
                 self._send_json({"error": str(exc)}, 500)
