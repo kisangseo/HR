@@ -829,7 +829,7 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
     sql = """
         SELECT
             id, submitted_at, full_name, email, phone,
-            primary_position, other_positions, status, source, cognito_pdf_url, cognito_document_link, background_pdf_url, background_document_url, resume_file_url
+            primary_position, other_positions, status, source, cognito_pdf_url, cognito_document_link, background_pdf_url, background_document_url, resume_file_url, contacted
         FROM dbo.job_applications
         WHERE 1 = 1
     """
@@ -865,7 +865,7 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
                 WHEN status = 'Needs Approval' THEN 2
                 ELSE 3
             END,
-            submitted_at DESC
+            submitted_at ASC
         """
 
     with get_sql_connection() as conn:
@@ -902,6 +902,7 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
                 "cognitoPdfUrl": row[9],
                 "cognitoDocumentLink": row[10],
                 "documents": build_document_links(row[9], row[10], row[11], row[12], row[13]),
+                "contacted": bool(row[14]) if row[14] is not None else False,
             }
         )
     # Smart presentation layer:
@@ -1031,6 +1032,21 @@ def _approve_or_deny_application(application_id: int, action: str, actor_email: 
         conn.commit()
 
 
+def _set_contacted(application_id: int, contacted: bool) -> None:
+    with get_sql_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE dbo.job_applications
+            SET contacted = ?
+            WHERE id = ?
+            """,
+            1 if contacted else 0,
+            application_id,
+        )
+        conn.commit()
+
+
 def run_email_ingest(scan_limit: int, source_folder: str = "all") -> dict[str, Any]:
     from email_ingest import run_ingest
 
@@ -1157,6 +1173,20 @@ def app(environ, start_response):
             try:
                 _approve_or_deny_application(app_id, action, actor_email)
                 return _wsgi_json(start_response, {"ok": True, "id": app_id, "action": action})
+            except Exception as exc:
+                return _wsgi_json(start_response, {"error": str(exc)}, 500)
+
+        applicant_contacted_match = re.fullmatch(r"/api/applicants/(\d+)/contacted", path or "")
+        if applicant_contacted_match:
+            app_id = int(applicant_contacted_match.group(1))
+            try:
+                payload = parse_json_body(body_text or "{}")
+            except Exception:
+                return _wsgi_json(start_response, {"error": "Invalid JSON payload."}, 400)
+            contacted = bool(payload.get("contacted"))
+            try:
+                _set_contacted(app_id, contacted)
+                return _wsgi_json(start_response, {"ok": True, "id": app_id, "contacted": contacted})
             except Exception as exc:
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
 
@@ -1357,6 +1387,23 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 _approve_or_deny_application(app_id, action, actor_email)
                 self._send_json({"ok": True, "id": app_id, "action": action})
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, 500)
+            return
+        applicant_contacted_match = re.fullmatch(r"/api/applicants/(\d+)/contacted", parsed.path or "")
+        if applicant_contacted_match:
+            app_id = int(applicant_contacted_match.group(1))
+            content_length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(content_length).decode("utf-8")
+            try:
+                payload = parse_json_body(body or "{}")
+            except Exception:
+                self._send_json({"error": "Invalid JSON payload."}, 400)
+                return
+            contacted = bool(payload.get("contacted"))
+            try:
+                _set_contacted(app_id, contacted)
+                self._send_json({"ok": True, "id": app_id, "contacted": contacted})
             except Exception as exc:
                 self._send_json({"error": str(exc)}, 500)
             return

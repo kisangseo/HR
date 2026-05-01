@@ -98,7 +98,7 @@ async function loadApplicants() {
 
 function renderTable(applicants) {
   if (!applicants.length) {
-    els.applicantRows.innerHTML = '<tr><td colspan="9">No applicants found.</td></tr>';
+    els.applicantRows.innerHTML = '<tr><td colspan="10">No applicants found.</td></tr>';
     return;
   }
 
@@ -120,6 +120,7 @@ function renderTable(applicants) {
         <td>${escapeHtml(applicant.email || '—')}</td>
         <td>${escapeHtml(applicant.phone || '—')}</td>
         <td>${renderDocumentLinks(applicant.documents || [])}</td>
+        <td>${renderContactedCell(applicant)}</td>
         <td>${renderActionCell(applicant)}</td>
       </tr>`;
     })
@@ -251,6 +252,11 @@ function renderActionCell(applicant) {
   `;
 }
 
+function renderContactedCell(applicant) {
+  const checked = applicant.contacted ? 'checked' : '';
+  return `<input type="checkbox" data-contacted-id="${applicant.id}" ${checked} />`;
+}
+
 els.applicantRows.addEventListener('click', async (event) => {
   const btn = event.target.closest('button[data-action]');
   if (!btn) return;
@@ -279,5 +285,27 @@ els.applicantRows.addEventListener('click', async (event) => {
     alert(err.message || String(err));
   } finally {
     btn.disabled = false;
+  }
+});
+
+els.applicantRows.addEventListener('change', async (event) => {
+  const checkbox = event.target.closest('input[type="checkbox"][data-contacted-id]');
+  if (!checkbox) return;
+  const id = checkbox.getAttribute('data-contacted-id');
+  const contacted = checkbox.checked;
+  checkbox.disabled = true;
+  try {
+    const response = await fetch(`/api/applicants/${id}/contacted`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contacted })
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || 'Failed to update contacted status');
+  } catch (err) {
+    checkbox.checked = !contacted;
+    alert(err.message || String(err));
+  } finally {
+    checkbox.disabled = false;
   }
 });
