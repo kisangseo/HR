@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover
     pyodbc = None
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = "2026-04-29.cognito-upsert-v1"
+APP_VERSION = "2026-05-01.revert-auth-hotfix-v1"
 SQL_CONNECTION_STRING = os.getenv("HR_SQL_CONNECTION_STRING", "").strip()
 MAKE_WEBHOOK_TOKEN = os.getenv("HR_MAKE_WEBHOOK_TOKEN", "").strip()
 RUN_INGEST_TOKEN = os.getenv("HR_RUN_INGEST_TOKEN", "").strip()
