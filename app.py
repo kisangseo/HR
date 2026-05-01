@@ -592,9 +592,9 @@ def upsert_background_record(cursor, mapped: dict[str, Any], payload: dict[str, 
             UPDATE dbo.job_applications
             SET status = 'Background Check Submitted',
                 raw_payload = ?,
-                cognito_pdf_url = COALESCE(NULLIF(?, ''), cognito_pdf_url),
-                cognito_document_link = COALESCE(NULLIF(?, ''), cognito_document_link),
-                cognito_date_submitted = COALESCE(TRY_CAST(? AS DATETIME2), cognito_date_submitted),
+                background_pdf_url = COALESCE(NULLIF(?, ''), background_pdf_url),
+                background_document_url = COALESCE(NULLIF(?, ''), background_document_url),
+                background_submitted_at = COALESCE(TRY_CAST(? AS DATETIME2), background_submitted_at),
                 last_cognito_sync_at = SYSUTCDATETIME()
             WHERE id = ?
             """,
@@ -807,7 +807,7 @@ def ingest_csv(csv_text: str) -> dict[str, Any]:
 
 
 
-def build_document_links(cognito_pdf_url: Any, cognito_document_link: Any, resume_file_url: Any, raw_payload: Any) -> list[dict[str, str]]:
+def build_document_links(cognito_pdf_url: Any, cognito_document_link: Any, background_pdf_url: Any, background_document_url: Any, resume_file_url: Any) -> list[dict[str, str]]:
     links: list[dict[str, str]] = []
 
     def add(label: str, url: Any):
@@ -820,11 +820,9 @@ def build_document_links(cognito_pdf_url: Any, cognito_document_link: Any, resum
 
     add("Initial Application / Consent Form", cognito_pdf_url)
     add("Initial Application Document", cognito_document_link)
+    add("Background Check Form", background_pdf_url)
+    add("Background Check Document", background_document_url)
     add("Resume", resume_file_url)
-
-    payload_obj = raw_payload if isinstance(raw_payload, dict) else {}
-    add("Background Check Form", payload_obj.get("background_pdf_url") or payload_obj.get("Entry.Document2"))
-    add("Background Check Document", payload_obj.get("background_document_url") or payload_obj.get("Entry.Document1"))
 
     return links
 
@@ -833,7 +831,7 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
     sql = """
         SELECT
             id, submitted_at, full_name, email, phone,
-            primary_position, other_positions, status, source, cognito_pdf_url, cognito_document_link, resume_file_url, raw_payload
+            primary_position, other_positions, status, source, cognito_pdf_url, cognito_document_link, background_pdf_url, background_document_url, resume_file_url
         FROM dbo.job_applications
         WHERE 1 = 1
     """
@@ -897,7 +895,7 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
                 "source": row[8],
                 "cognitoPdfUrl": row[9],
                 "cognitoDocumentLink": row[10],
-                "documents": build_document_links(row[9], row[10], row[11], json.loads(row[12] or "{}") if row[12] else {}),
+                "documents": build_document_links(row[9], row[10], row[11], row[12], row[13]),
             }
         )
     # Smart presentation layer:
