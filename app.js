@@ -96,7 +96,7 @@ async function loadApplicants() {
   });
 
   const response = await fetch(`/api/applicants?${params.toString()}`);
-  const payload = await response.json();
+  const payload = await readJsonResponse(response, 'Failed to load applicants');
   state.applicants = payload.applicants || [];
   renderTable(state.applicants);
 }
@@ -168,7 +168,7 @@ async function denySelectedApplicants() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids: visibleIds })
     });
-    const payload = await response.json();
+    const payload = await readJsonResponse(response, 'Failed to deny selected applicants');
     if (!response.ok) throw new Error(payload.error || 'Failed to deny selected applicants');
     await loadApplicants();
   } catch (err) {
@@ -242,7 +242,7 @@ function escapeHtml(value) {
 
 async function loadJobTitles() {
   const response = await fetch('/api/job-titles');
-  const payload = await response.json();
+  const payload = await readJsonResponse(response, 'Failed to load job titles');
   const titles = payload.job_titles || [];
   const existing = new Set(
     Array.from(els.jobTitleFilter.options).map((option) => option.value.toLowerCase())
@@ -260,7 +260,7 @@ async function loadJobTitles() {
 
 async function loadStatuses() {
   const response = await fetch('/api/statuses');
-  const payload = await response.json();
+  const payload = await readJsonResponse(response, 'Failed to load statuses');
   const statuses = payload.statuses || [];
   const existing = new Set(Array.from(els.statusFilter.options).map((option) => option.value.toLowerCase()));
   for (const status of statuses) {
@@ -274,6 +274,26 @@ async function loadStatuses() {
 }
 
 Promise.all([loadJobTitles(), loadStatuses(), loadApplicants()]).catch((error) => console.error(error));
+
+async function readJsonResponse(response, fallbackMessage) {
+  const contentType = response.headers.get('content-type') || '';
+  const bodyText = await response.text();
+  let payload = {};
+  if (bodyText && contentType.includes('application/json')) {
+    try {
+      payload = JSON.parse(bodyText);
+    } catch (error) {
+      throw new Error(`${fallbackMessage}: invalid JSON response`);
+    }
+  } else if (bodyText) {
+    const preview = bodyText.slice(0, 120).replace(/\s+/g, ' ').trim();
+    throw new Error(`${fallbackMessage}: server returned non-JSON response (${preview})`);
+  }
+  if (!response.ok) {
+    throw new Error(payload.error || fallbackMessage);
+  }
+  return payload;
+}
 
 
 
@@ -303,8 +323,7 @@ els.applicantRows.addEventListener('click', async (event) => {
     const response = await fetch(`/api/applicants/${id}/${action}`, {
       method: 'POST',
     });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || 'Action failed');
+    await readJsonResponse(response, 'Action failed');
     await loadApplicants();
   } catch (err) {
     alert(err.message || String(err));
@@ -333,8 +352,7 @@ els.applicantRows.addEventListener('change', async (event) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ contacted })
     });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || 'Failed to update contacted status');
+    await readJsonResponse(response, 'Failed to update contacted status');
   } catch (err) {
     checkbox.checked = !contacted;
     alert(err.message || String(err));
