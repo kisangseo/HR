@@ -3,6 +3,15 @@ const state = {
 };
 
 const els = {
+  authSection: document.getElementById('authSection'),
+  appSection: document.getElementById('appSection'),
+  loginEmail: document.getElementById('loginEmail'),
+  loginPassword: document.getElementById('loginPassword'),
+  loginBtn: document.getElementById('loginBtn'),
+  changePasswordSection: document.getElementById('changePasswordSection'),
+  newPassword: document.getElementById('newPassword'),
+  changePasswordBtn: document.getElementById('changePasswordBtn'),
+  authMessage: document.getElementById('authMessage'),
   nameFilter: document.getElementById('nameFilter'),
   dateRangeFilter: document.getElementById('dateRangeFilter'),
   datePicker: document.getElementById('datePicker'),
@@ -222,23 +231,19 @@ async function loadStatuses() {
   }
 }
 
-Promise.all([loadJobTitles(), loadStatuses(), loadApplicants()]).catch((error) => console.error(error));
-
-
-function getReviewerContext() {
-  let email = localStorage.getItem('hrReviewerEmail') || '';
-  let permission = localStorage.getItem('hrReviewerPermission') || '';
-  if (!email) {
-    email = window.prompt('Enter your HR email for approve/deny actions:') || '';
-    if (!email.trim()) return null;
-    localStorage.setItem('hrReviewerEmail', email.trim());
+async function initializeApp() {
+  const response = await fetch('/api/me');
+  if (!response.ok) return;
+  const payload = await response.json();
+  if (!payload.authenticated) return;
+  if (payload.user?.must_change_password) {
+    els.changePasswordSection.hidden = false;
+    els.authMessage.textContent = 'Password change required.';
+    return;
   }
-  if (!permission) {
-    permission = (window.prompt('Enter your permission (admin/edit/supervisor):') || '').toLowerCase().trim();
-    if (!permission) return null;
-    localStorage.setItem('hrReviewerPermission', permission);
-  }
-  return { email: email.trim(), permission: permission.trim() };
+  els.authSection.hidden = true;
+  els.appSection.hidden = false;
+  await Promise.all([loadJobTitles(), loadStatuses(), loadApplicants()]);
 }
 
 function renderActionCell(applicant) {
@@ -266,17 +271,10 @@ els.applicantRows.addEventListener('click', async (event) => {
   const ok = window.confirm(`Are you sure you want to ${action} and send ${action} email to ${applicantEmail}?`);
   if (!ok) return;
 
-  const reviewer = getReviewerContext();
-  if (!reviewer) return;
-
   btn.disabled = true;
   try {
     const response = await fetch(`/api/applicants/${id}/${action}`, {
-      method: 'POST',
-      headers: {
-        'X-User-Email': reviewer.email,
-        'X-User-Permission': reviewer.permission
-      }
+      method: 'POST'
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || 'Action failed');

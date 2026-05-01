@@ -7,7 +7,20 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <main class="container">
+    <section id="authSection" class="container">
+      <h1>HR Login</h1>
+      <input id="loginEmail" type="email" placeholder="Email" />
+      <input id="loginPassword" type="password" placeholder="Password" />
+      <button id="loginBtn" type="button">Log In</button>
+      <div id="changePasswordSection" hidden>
+        <p>You must change your password.</p>
+        <input id="newPassword" type="password" placeholder="New Password" />
+        <button id="changePasswordBtn" type="button">Update Password</button>
+      </div>
+      <p id="authMessage"></p>
+    </section>
+
+    <main id="appSection" class="container" hidden>
       <header>
         <h1>Job Applicants</h1>
         <p>Search by name, date, and position.</p>
