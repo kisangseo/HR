@@ -1050,62 +1050,6 @@ def _set_contacted(application_id: int, contacted: bool) -> None:
         conn.commit()
 
 
-def _query_user_by_email(email: str) -> dict[str, Any] | None:
-    with get_sql_connection() as conn:
-        cursor = conn.cursor()
-        row = cursor.execute(
-            """
-            SELECT user_id, email, password_hash, must_change_password, is_active, permission
-            FROM search.users
-            WHERE LOWER(email) = LOWER(?)
-            """,
-            email,
-        ).fetchone()
-    if not row:
-        return None
-    return {
-        "user_id": int(row[0]),
-        "email": str(row[1] or "").strip(),
-        "password_hash": str(row[2] or ""),
-        "must_change_password": bool(row[3]),
-        "is_active": bool(row[4]),
-        "permission": str(row[5] or "").strip().lower(),
-    }
-
-
-def _update_user_password(user_id: int, new_password: str) -> None:
-    with get_sql_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            UPDATE search.users
-            SET password_hash = ?, must_change_password = 0
-            WHERE user_id = ?
-            """,
-            new_password,
-            user_id,
-        )
-        conn.commit()
-
-
-def _extract_cookie_value(cookie_header: str, key: str) -> str:
-    for part in (cookie_header or "").split(";"):
-        name, _, value = part.strip().partition("=")
-        if name == key:
-            return value.strip()
-    return ""
-
-
-def _session_user_from_cookie(cookie_header: str) -> dict[str, Any] | None:
-    token = _extract_cookie_value(cookie_header, SESSION_COOKIE_NAME)
-    if not token:
-        return None
-    session = SESSION_STORE.get(token)
-    if not session:
-        return None
-    return dict(session)
-
-
 def run_email_ingest(scan_limit: int, source_folder: str = "all") -> dict[str, Any]:
     from email_ingest import run_ingest
 
@@ -1279,10 +1223,6 @@ def app(environ, start_response):
 
         applicant_contacted_match = re.fullmatch(r"/api/applicants/(\d+)/contacted", path or "")
         if applicant_contacted_match:
-            if not current_user:
-                return _wsgi_json(start_response, {"error": "Unauthorized"}, 401)
-            if not _is_allowed_approver(str(current_user.get("permission") or "")):
-                return _wsgi_json(start_response, {"error": "Forbidden."}, 403)
             app_id = int(applicant_contacted_match.group(1))
             try:
                 payload = parse_json_body(body_text or "{}")
@@ -1551,9 +1491,6 @@ class Handler(BaseHTTPRequestHandler):
             return
         applicant_contacted_match = re.fullmatch(r"/api/applicants/(\d+)/contacted", parsed.path or "")
         if applicant_contacted_match:
-            if not current_user or not _is_allowed_approver(str(current_user.get("permission") or "")):
-                self._send_json({"error": "Forbidden."}, 403)
-                return
             app_id = int(applicant_contacted_match.group(1))
             content_length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(content_length).decode("utf-8")
