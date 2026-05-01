@@ -1167,6 +1167,8 @@ def app(environ, start_response):
 
     if method == "GET":
         if path == "/":
+            if not current_user:
+                return _wsgi_json(start_response, {"error": "Unauthorized"}, 401)
             return _wsgi_file(start_response, INDEX_HTML, "text/html; charset=utf-8")
         if path == "/app.js":
             return _wsgi_file(start_response, STATIC_JS, "text/javascript; charset=utf-8")
@@ -1405,6 +1407,9 @@ class Handler(BaseHTTPRequestHandler):
         current_user = _session_user_from_cookie(self.headers.get("Cookie", ""))
 
         if parsed.path == "/":
+            if not current_user:
+                self._send_json({"error": "Unauthorized"}, 401)
+                return
             self._send_file(INDEX_HTML, "text/html; charset=utf-8")
             return
 
