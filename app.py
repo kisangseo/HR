@@ -818,10 +818,8 @@ def build_document_links(cognito_pdf_url: Any, cognito_document_link: Any, backg
             return
         links.append({"label": label, "url": text})
 
-    add("Initial Application / Consent Form", cognito_pdf_url)
-    add("Initial Application Document", cognito_document_link)
+    add("Initial Application", cognito_document_link)
     add("Background Check Form", background_pdf_url)
-    add("Background Check Document", background_document_url)
     add("Resume", resume_file_url)
 
     return links
