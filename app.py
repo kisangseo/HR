@@ -913,16 +913,23 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
             grouped[key] = {
                 **item,
                 "allPositions": initial_positions,
+                "documentsByUrl": {doc.get("url"): doc for doc in item.get("documents", []) if doc.get("url")},
             }
             continue
 
         existing = grouped[key]
         existing["allPositions"].update([p for p in [item["primaryPosition"]] if p and p != "—"])
         existing["allPositions"].update([p for p in item["otherPositions"] if p and p != "—"])
+        for doc in item.get("documents", []):
+            url = doc.get("url")
+            if not url:
+                continue
+            existing["documentsByUrl"][url] = doc
         # Keep latest submission date row as base
         if item["submittedAt"] > existing["submittedAt"]:
             existing["submittedAt"] = item["submittedAt"]
             existing["primaryPosition"] = item["primaryPosition"]
+            existing["status"] = item.get("status") or existing.get("status")
             existing["email"] = item["email"] or existing["email"]
             existing["phone"] = item["phone"] or existing["phone"]
 
@@ -933,6 +940,8 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
         if primary in all_positions:
             all_positions.remove(primary)
         merged["otherPositions"] = sorted(all_positions)
+        merged["documents"] = list(merged.get("documentsByUrl", {}).values())
+        merged.pop("documentsByUrl", None)
         merged.pop("allPositions", None)
         output.append(merged)
 
