@@ -299,6 +299,13 @@ async function readJsonResponse(response, fallbackMessage) {
 
 function renderActionCell(applicant) {
   const status = String(applicant.status || '').toLowerCase();
+  if (status === 'denied') {
+    return `
+      <div class="action-buttons">
+        <button type="button" class="small-btn" data-action="undo-denial" data-id="${applicant.id}">Undo Denial</button>
+      </div>
+    `;
+  }
   if (status !== 'needs approval') return '—';
   return `
     <div class="action-buttons">

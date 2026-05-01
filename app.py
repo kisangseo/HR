@@ -1049,6 +1049,21 @@ def _deny_applications(application_ids: list[int]) -> int:
         return int(cursor.rowcount or 0)
 
 
+def _undo_denial(application_id: int) -> None:
+    with get_sql_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE dbo.job_applications
+            SET denied = 0
+            WHERE id = ?
+            """,
+            (application_id,),
+        )
+        conn.commit()
+        return int(cursor.rowcount or 0)
+
+
 def _set_contacted(application_id: int, contacted: bool) -> None:
     with get_sql_connection() as conn:
         cursor = conn.cursor()
@@ -1188,6 +1203,15 @@ def app(environ, start_response):
             try:
                 denied_count = _deny_applications([int(value) for value in ids])
                 return _wsgi_json(start_response, {"ok": True, "denied_count": denied_count})
+            except Exception as exc:
+                return _wsgi_json(start_response, {"error": str(exc)}, 500)
+
+        undo_denial_match = re.fullmatch(r"/api/applicants/(\d+)/undo-denial", path or "")
+        if undo_denial_match:
+            app_id = int(undo_denial_match.group(1))
+            try:
+                _undo_denial(app_id)
+                return _wsgi_json(start_response, {"ok": True, "id": app_id, "action": "undo-denial"})
             except Exception as exc:
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
 
@@ -1397,6 +1421,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        undo_denial_match = re.fullmatch(r"/api/applicants/(\d+)/undo-denial", parsed.path or "")
+        if undo_denial_match:
+            app_id = int(undo_denial_match.group(1))
+            try:
+                _undo_denial(app_id)
+                self._send_json({"ok": True, "id": app_id, "action": "undo-denial"})
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, 500)
+            return
         if parsed.path == "/api/applicants/deny":
             content_length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(content_length).decode("utf-8")
