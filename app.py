@@ -592,9 +592,9 @@ def upsert_background_record(cursor, mapped: dict[str, Any], payload: dict[str, 
             UPDATE dbo.job_applications
             SET status = 'Background Check Submitted',
                 raw_payload = ?,
-                cognito_pdf_url = COALESCE(NULLIF(?, ''), cognito_pdf_url),
-                cognito_document_link = COALESCE(NULLIF(?, ''), cognito_document_link),
-                cognito_date_submitted = COALESCE(TRY_CAST(? AS DATETIME2), cognito_date_submitted),
+                background_pdf_url = COALESCE(NULLIF(?, ''), background_pdf_url),
+                background_document_url = COALESCE(NULLIF(?, ''), background_document_url),
+                background_submitted_at = COALESCE(TRY_CAST(? AS DATETIME2), background_submitted_at),
                 last_cognito_sync_at = SYSUTCDATETIME()
             WHERE id = ?
             """,
@@ -807,7 +807,7 @@ def ingest_csv(csv_text: str) -> dict[str, Any]:
 
 
 
-def build_document_links(cognito_pdf_url: Any, cognito_document_link: Any, resume_file_url: Any, raw_payload: Any) -> list[dict[str, str]]:
+def build_document_links(cognito_pdf_url: Any, cognito_document_link: Any, background_pdf_url: Any, background_document_url: Any, resume_file_url: Any) -> list[dict[str, str]]:
     links: list[dict[str, str]] = []
 
     def add(label: str, url: Any):
@@ -818,13 +818,9 @@ def build_document_links(cognito_pdf_url: Any, cognito_document_link: Any, resum
             return
         links.append({"label": label, "url": text})
 
-    add("Initial Application / Consent Form", cognito_pdf_url)
-    add("Initial Application Document", cognito_document_link)
+    add("Initial Application", cognito_document_link)
+    add("Background Check Form", background_pdf_url)
     add("Resume", resume_file_url)
-
-    payload_obj = raw_payload if isinstance(raw_payload, dict) else {}
-    add("Background Check Form", payload_obj.get("background_pdf_url") or payload_obj.get("Entry.Document2"))
-    add("Background Check Document", payload_obj.get("background_document_url") or payload_obj.get("Entry.Document1"))
 
     return links
 
@@ -833,7 +829,7 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
     sql = """
         SELECT
             id, submitted_at, full_name, email, phone,
-            primary_position, other_positions, status, source, cognito_pdf_url, cognito_document_link, resume_file_url, raw_payload
+            primary_position, other_positions, status, source, cognito_pdf_url, cognito_document_link, background_pdf_url, background_document_url, resume_file_url, contacted
         FROM dbo.job_applications
         WHERE 1 = 1
     """
@@ -862,7 +858,15 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
         sql += " AND CAST(submitted_at AS date) <= ?"
         params.append(filters["date_to"])
 
-    sql += " ORDER BY submitted_at DESC"
+    sql += """
+        ORDER BY
+            CASE
+                WHEN status = 'Background Check Submitted' THEN 1
+                WHEN status = 'Needs Approval' THEN 2
+                ELSE 3
+            END,
+            submitted_at ASC
+        """
 
     with get_sql_connection() as conn:
         cursor = conn.cursor()
@@ -897,7 +901,8 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
                 "source": row[8],
                 "cognitoPdfUrl": row[9],
                 "cognitoDocumentLink": row[10],
-                "documents": build_document_links(row[9], row[10], row[11], json.loads(row[12] or "{}") if row[12] else {}),
+                "documents": build_document_links(row[9], row[10], row[11], row[12], row[13]),
+                "contacted": bool(row[14]) if row[14] is not None else False,
             }
         )
     # Smart presentation layer:
@@ -915,16 +920,23 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
             grouped[key] = {
                 **item,
                 "allPositions": initial_positions,
+                "documentsByUrl": {doc.get("url"): doc for doc in item.get("documents", []) if doc.get("url")},
             }
             continue
 
         existing = grouped[key]
         existing["allPositions"].update([p for p in [item["primaryPosition"]] if p and p != "—"])
         existing["allPositions"].update([p for p in item["otherPositions"] if p and p != "—"])
+        for doc in item.get("documents", []):
+            url = doc.get("url")
+            if not url:
+                continue
+            existing["documentsByUrl"][url] = doc
         # Keep latest submission date row as base
         if item["submittedAt"] > existing["submittedAt"]:
             existing["submittedAt"] = item["submittedAt"]
             existing["primaryPosition"] = item["primaryPosition"]
+            existing["status"] = item.get("status") or existing.get("status")
             existing["email"] = item["email"] or existing["email"]
             existing["phone"] = item["phone"] or existing["phone"]
 
@@ -935,6 +947,8 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
         if primary in all_positions:
             all_positions.remove(primary)
         merged["otherPositions"] = sorted(all_positions)
+        merged["documents"] = list(merged.get("documentsByUrl", {}).values())
+        merged.pop("documentsByUrl", None)
         merged.pop("allPositions", None)
         output.append(merged)
 
@@ -1015,6 +1029,21 @@ def _approve_or_deny_application(application_id: int, action: str, actor_email: 
     with get_sql_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(sql, (actor_email, application_id))
+        conn.commit()
+
+
+def _set_contacted(application_id: int, contacted: bool) -> None:
+    with get_sql_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE dbo.job_applications
+            SET contacted = ?
+            WHERE id = ?
+            """,
+            1 if contacted else 0,
+            application_id,
+        )
         conn.commit()
 
 
@@ -1144,6 +1173,20 @@ def app(environ, start_response):
             try:
                 _approve_or_deny_application(app_id, action, actor_email)
                 return _wsgi_json(start_response, {"ok": True, "id": app_id, "action": action})
+            except Exception as exc:
+                return _wsgi_json(start_response, {"error": str(exc)}, 500)
+
+        applicant_contacted_match = re.fullmatch(r"/api/applicants/(\d+)/contacted", path or "")
+        if applicant_contacted_match:
+            app_id = int(applicant_contacted_match.group(1))
+            try:
+                payload = parse_json_body(body_text or "{}")
+            except Exception:
+                return _wsgi_json(start_response, {"error": "Invalid JSON payload."}, 400)
+            contacted = bool(payload.get("contacted"))
+            try:
+                _set_contacted(app_id, contacted)
+                return _wsgi_json(start_response, {"ok": True, "id": app_id, "contacted": contacted})
             except Exception as exc:
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
 
@@ -1344,6 +1387,23 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 _approve_or_deny_application(app_id, action, actor_email)
                 self._send_json({"ok": True, "id": app_id, "action": action})
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, 500)
+            return
+        applicant_contacted_match = re.fullmatch(r"/api/applicants/(\d+)/contacted", parsed.path or "")
+        if applicant_contacted_match:
+            app_id = int(applicant_contacted_match.group(1))
+            content_length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(content_length).decode("utf-8")
+            try:
+                payload = parse_json_body(body or "{}")
+            except Exception:
+                self._send_json({"error": "Invalid JSON payload."}, 400)
+                return
+            contacted = bool(payload.get("contacted"))
+            try:
+                _set_contacted(app_id, contacted)
+                self._send_json({"ok": True, "id": app_id, "contacted": contacted})
             except Exception as exc:
                 self._send_json({"error": str(exc)}, 500)
             return
