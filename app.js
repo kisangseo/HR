@@ -107,7 +107,7 @@ function renderTable(applicants) {
   syncSelectionWithVisibleRows(applicants);
   updateBulkActionUi();
   if (!applicants.length) {
-    els.applicantRows.innerHTML = '<tr><td colspan="10">No applicants found.</td></tr>';
+    els.applicantRows.innerHTML = '<tr><td colspan="11">No applicants found.</td></tr>';
     return;
   }
 
@@ -317,12 +317,6 @@ async function readJsonResponse(response, fallbackMessage) {
 
 function renderActionCell(applicant) {
   const status = String(applicant.status || '').toLowerCase();
-  const selectedVisibleIds = state.applicants
-    .map((item) => String(item.id))
-    .filter((id) => state.selectedIds.has(Number(id)) || state.selectedIds.has(id));
-  const showSingleRowDeny =
-    selectedVisibleIds.length === 1 && selectedVisibleIds[0] === String(applicant.id) && status !== 'denied';
-
   if (status === 'denied') {
     return `
       <div class="action-buttons">
@@ -330,25 +324,13 @@ function renderActionCell(applicant) {
       </div>
     `;
   }
-
-  if (status === 'needs approval') {
-    return `
-      <div class="action-buttons">
-        <button type="button" class="small-btn" data-action="approve" data-id="${applicant.id}" data-email="${escapeHtml(applicant.email || '')}">Approve</button>
-        <button type="button" class="small-btn danger" data-action="deny" data-id="${applicant.id}" data-email="${escapeHtml(applicant.email || '')}">Deny</button>
-      </div>
-    `;
-  }
-
-  if (showSingleRowDeny) {
-    return `
-      <div class="action-buttons">
-        <button type="button" class="small-btn danger" data-action="deny" data-id="${applicant.id}" data-email="${escapeHtml(applicant.email || '')}">Deny</button>
-      </div>
-    `;
-  }
-
-  return '—';
+  if (status !== 'needs approval') return '—';
+  return `
+    <div class="action-buttons">
+      <button type="button" class="small-btn" data-action="approve" data-id="${applicant.id}" data-email="${escapeHtml(applicant.email || '')}">Approve</button>
+      <button type="button" class="small-btn danger" data-action="deny" data-id="${applicant.id}" data-email="${escapeHtml(applicant.email || '')}">Deny</button>
+    </div>
+  `;
 }
 
 function renderContactedCell(applicant) {

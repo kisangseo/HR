@@ -478,9 +478,9 @@ def main() -> None:
     cli.add_argument("--scan-limit", type=int, default=INBOX_SCAN_LIMIT, help="Maximum inbox emails to inspect")
     cli.add_argument(
         "--source-folder",
-        choices=["inbox", "processed"],
+        choices=["all", "inbox", "processed"],
         default="inbox",
-        help="Folder scope: inbox only by default, or processed for one-time recovery.",
+        help="Folder scope: all (inbox + processed), inbox only, or processed only.",
     )
     args = cli.parse_args()
     run_ingest(max(args.scan_limit, 1), source_folder=args.source_folder)

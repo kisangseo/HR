@@ -357,13 +357,76 @@ def map_row(raw_row: dict[str, str]) -> tuple[dict[str, Any] | None, list[str]]:
     }, errors
 
 
-def insert_mapped_record(cursor, mapped: dict[str, Any]) -> None:
+def insert_mapped_record(cursor, mapped: dict[str, Any]) -> int:
+    first_norm = normalize_name(str(mapped.get("first_name") or ""))
+    last_norm = normalize_name(str(mapped.get("last_name") or ""))
+    email_norm = normalize_email(str(mapped.get("email") or ""))
+    phone_norm = normalize_phone_us(str(mapped.get("phone") or ""))
+    existing = cursor.execute(
+        """
+        SELECT TOP 1 id
+        FROM dbo.job_applications
+        WHERE
+          (
+            (? <> '' AND ? <> '' AND LOWER(LTRIM(RTRIM(COALESCE(first_name_norm, '')))) = ? AND LOWER(LTRIM(RTRIM(COALESCE(last_name_norm, '')))) = ?)
+            OR
+            (? <> '' AND LOWER(LTRIM(RTRIM(COALESCE(email_norm, '')))) = ?)
+            OR
+            (? <> '' AND LTRIM(RTRIM(COALESCE(phone_norm, ''))) = ?)
+          )
+        ORDER BY COALESCE(updated_at, created_at) DESC
+        """,
+        (first_norm, last_norm, first_norm, last_norm, email_norm, email_norm, phone_norm, phone_norm),
+    ).fetchone()
+    if existing:
+        app_id = int(existing[0])
+        cursor.execute(
+            """
+            UPDATE dbo.job_applications
+            SET submitted_at = ?,
+                first_name = ?,
+                last_name = ?,
+                email = ?,
+                phone = ?,
+                primary_position = ?,
+                other_positions = ?,
+                status = COALESCE(NULLIF(?, ''), status),
+                source = COALESCE(NULLIF(?, ''), source),
+                raw_payload = ?,
+                first_name_norm = ?,
+                last_name_norm = ?,
+                email_norm = NULLIF(?, ''),
+                phone_norm = NULLIF(?, '')
+            WHERE id = ?
+            """,
+            (
+                mapped["submitted_at"],
+                mapped["first_name"],
+                mapped["last_name"],
+                mapped["email"],
+                mapped["phone"],
+                mapped["primary_position"],
+                json.dumps(mapped["other_positions"]),
+                mapped["status"],
+                mapped["source"],
+                json.dumps(mapped["raw_payload"]),
+                first_norm,
+                last_norm,
+                email_norm,
+                phone_norm,
+                app_id,
+            ),
+        )
+        return app_id
+
     cursor.execute(
         """
         INSERT INTO dbo.job_applications (
             submitted_at, first_name, last_name, email, phone,
-            primary_position, other_positions, status, source, raw_payload
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            primary_position, other_positions, status, source, raw_payload,
+            first_name_norm, last_name_norm, email_norm, phone_norm
+        ) OUTPUT INSERTED.id
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''))
         """,
         (
             mapped["submitted_at"],
@@ -376,8 +439,14 @@ def insert_mapped_record(cursor, mapped: dict[str, Any]) -> None:
             mapped["status"],
             mapped["source"],
             json.dumps(mapped["raw_payload"]),
+            first_norm,
+            last_norm,
+            email_norm,
+            phone_norm,
         ),
     )
+    inserted = cursor.fetchone()
+    return int(inserted[0]) if inserted else 0
 
 
 def upsert_cognito_record(cursor, mapped: dict[str, Any], payload: dict[str, Any]) -> int:
@@ -1012,106 +1081,33 @@ def query_statuses() -> list[str]:
         output.append("Denied")
     return sorted(output, key=lambda value: value.lower())
 
-def send_graph_email(to_email: str, subject: str, html_body: str) -> None:
-    if not CLIENT_ID or not CLIENT_SECRET or not TENANT_ID or not MAILBOX_EMAIL:
-        raise RuntimeError("Missing Graph email configuration. Set CLIENT_ID, CLIENT_SECRET, TENANT_ID, and MAILBOX_EMAIL.")
-    authority = f"https://login.microsoftonline.com/{TENANT_ID}"
-    app = msal.ConfidentialClientApplication(
-        CLIENT_ID,
-        authority=authority,
-        client_credential=CLIENT_SECRET,
-    )
-    token_result = app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
-    access_token = token_result.get("access_token")
-    if not access_token:
-        description = token_result.get("error_description") or token_result.get("error") or "unknown error"
-        raise RuntimeError(f"Failed to obtain Microsoft Graph token: {description}")
-
-    endpoint = f"https://graph.microsoft.com/v1.0/users/{MAILBOX_EMAIL}/sendMail"
-    payload = {
-        "message": {
-            "subject": subject,
-            "body": {"contentType": "HTML", "content": html_body},
-            "toRecipients": [{"emailAddress": {"address": to_email}}],
-        },
-        "saveToSentItems": "true",
-    }
-    response = requests.post(
-        endpoint,
-        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
-        json=payload,
-        timeout=20,
-    )
-    if response.status_code >= 400:
-        raise RuntimeError(f"Failed to send email via Microsoft Graph: {response.status_code} {response.text[:300]}")
-
-
 def _approve_or_deny_application(application_id: int, action: str) -> None:
     action_value = (action or "").strip().lower()
-    if action_value not in {"approve", "deny"}:
+    if action_value == "approve":
+        new_status = "Needs Approval - Approved"
+        sql = """
+            UPDATE dbo.job_applications
+            SET status = ?,
+                denied = 0
+            WHERE id = ?
+        """
+    elif action_value == "deny":
+        new_status = None
+        sql = """
+            UPDATE dbo.job_applications
+            SET denied = 1
+            WHERE id = ?
+        """
+    else:
         raise ValueError("Unsupported action.")
 
     with get_sql_connection() as conn:
         cursor = conn.cursor()
-        row = cursor.execute(
-            "SELECT email, status FROM dbo.job_applications WHERE id = ?",
-            (application_id,),
-        ).fetchone()
-        if not row:
-            raise ValueError("Applicant not found.")
-
-        to_email = (row[0] or "").strip()
-        current_status = normalize_status_label(row[1])
-
         if action_value == "approve":
-            if current_status != "Needs Approval":
-                raise ValueError("Approve action is only available for applicants in 'Needs Approval' status.")
-            cursor.execute(
-                """
-                UPDATE dbo.job_applications
-                SET status = ?,
-                    denied = 0
-                WHERE id = ?
-                """,
-                ("Needs Approval - Approved", application_id),
-            )
-            email_subject = "Background Check Form"
-            email_body = (
-                "<p>Your application has been approved for the next step.</p>"
-                "<p>Please complete the background check form here: "
-                '<a href="https://www.cognitoforms.com/BaltimoreCitySheriffsOffice3/BaltimoreCitySheriffsOffice">'
-                "https://www.cognitoforms.com/BaltimoreCitySheriffsOffice3/BaltimoreCitySheriffsOffice"
-                "</a></p>"
-            )
+            cursor.execute(sql, (new_status, application_id))
         else:
-            if current_status == "Needs Approval":
-                cursor.execute(
-                    """
-                    UPDATE dbo.job_applications
-                    SET status = ?, denied = 1
-                    WHERE id = ?
-                    """,
-                    ("Needs Approval - Denied", application_id),
-                )
-            else:
-                cursor.execute(
-                    """
-                    UPDATE dbo.job_applications
-                    SET status = ?, denied = 1
-                    WHERE id = ?
-                    """,
-                    ("Denied", application_id),
-                )
-            email_subject = "Application Update"
-            email_body = "<p>Thank you for your interest. At this time, your application has not been selected to move forward.</p>"
-
-        if int(cursor.rowcount or 0) <= 0:
-            raise RuntimeError("No rows were updated.")
+            cursor.execute(sql, (application_id,))
         conn.commit()
-
-    if not to_email:
-        raise RuntimeError("Applicant email is missing; status was updated but no email was sent.")
-    send_graph_email(to_email, email_subject, email_body)
 
 
 def _deny_applications(application_ids: list[int]) -> int:
@@ -1141,7 +1137,6 @@ def _undo_denial(application_id: int) -> None:
             (application_id,),
         )
         conn.commit()
-        return int(cursor.rowcount or 0)
 
 
 def _undo_denials(application_ids: list[int]) -> int:
@@ -1251,7 +1246,7 @@ def app(environ, start_response):
             except ValueError:
                 scan_limit = 500
             source_folder = ((query.get("source_folder") or ["inbox"])[0] or "inbox").strip().lower()
-            if source_folder not in {"inbox", "processed"}:
+            if source_folder not in {"all", "inbox", "processed"}:
                 source_folder = "inbox"
             try:
                 result = run_email_ingest(scan_limit=scan_limit, source_folder=source_folder)
@@ -1519,7 +1514,7 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 scan_limit = 500
             source_folder = ((query.get("source_folder") or ["inbox"])[0] or "inbox").strip().lower()
-            if source_folder not in {"inbox", "processed"}:
+            if source_folder not in {"all", "inbox", "processed"}:
                 source_folder = "inbox"
             try:
                 result = run_email_ingest(scan_limit=scan_limit, source_folder=source_folder)
