@@ -318,10 +318,10 @@ async function readJsonResponse(response, fallbackMessage) {
 function renderActionCell(applicant) {
   const status = String(applicant.status || '').toLowerCase();
   const selectedVisibleIds = state.applicants
-    .map((item) => item.id)
-    .filter((id) => state.selectedIds.has(id));
+    .map((item) => String(item.id))
+    .filter((id) => state.selectedIds.has(Number(id)) || state.selectedIds.has(id));
   const showSingleRowDeny =
-    selectedVisibleIds.length === 1 && selectedVisibleIds[0] === applicant.id && status !== 'denied';
+    selectedVisibleIds.length === 1 && selectedVisibleIds[0] === String(applicant.id) && status !== 'denied';
 
   if (status === 'denied') {
     return `
