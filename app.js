@@ -107,25 +107,18 @@ function renderTable(applicants) {
   syncSelectionWithVisibleRows(applicants);
   updateBulkActionUi();
   if (!applicants.length) {
-    els.applicantRows.innerHTML = '<tr><td colspan="11">No applicants found.</td></tr>';
+    els.applicantRows.innerHTML = '<tr><td colspan="10">No applicants found.</td></tr>';
     return;
   }
 
   els.applicantRows.innerHTML = applicants
     .map((applicant) => {
       const primary = shortenPosition(cleanDisplayPosition(applicant.primaryPosition || '—'));
-      const other = applicant.otherPositions?.length
-        ? applicant.otherPositions
-            .map((value) => shortenPosition(cleanDisplayPosition(value)))
-            .filter((value) => value && value !== '—')
-            .join(', ')
-        : '—';
       return `<tr>
         <td><input type="checkbox" data-select-id="${applicant.id}" ${state.selectedIds.has(applicant.id) ? 'checked' : ''} /></td>
         <td>${escapeHtml(applicant.name)}</td>
         <td>${formatDate(applicant.submittedAt)}</td>
         <td>${escapeHtml(primary)}</td>
-        <td>${escapeHtml(other)}</td>
         <td>${escapeHtml(applicant.status || '—')}</td>
         <td>${escapeHtml(applicant.email || '—')}</td>
         <td>${escapeHtml(applicant.phone || '—')}</td>
@@ -324,6 +317,12 @@ async function readJsonResponse(response, fallbackMessage) {
 
 function renderActionCell(applicant) {
   const status = String(applicant.status || '').toLowerCase();
+  const selectedVisibleIds = state.applicants
+    .map((item) => item.id)
+    .filter((id) => state.selectedIds.has(id));
+  const showSingleRowDeny =
+    selectedVisibleIds.length === 1 && selectedVisibleIds[0] === applicant.id && status !== 'denied';
+
   if (status === 'denied') {
     return `
       <div class="action-buttons">
@@ -331,13 +330,25 @@ function renderActionCell(applicant) {
       </div>
     `;
   }
-  if (status !== 'needs approval') return '—';
-  return `
-    <div class="action-buttons">
-      <button type="button" class="small-btn" data-action="approve" data-id="${applicant.id}" data-email="${escapeHtml(applicant.email || '')}">Approve</button>
-      <button type="button" class="small-btn danger" data-action="deny" data-id="${applicant.id}" data-email="${escapeHtml(applicant.email || '')}">Deny</button>
-    </div>
-  `;
+
+  if (status === 'needs approval') {
+    return `
+      <div class="action-buttons">
+        <button type="button" class="small-btn" data-action="approve" data-id="${applicant.id}" data-email="${escapeHtml(applicant.email || '')}">Approve</button>
+        <button type="button" class="small-btn danger" data-action="deny" data-id="${applicant.id}" data-email="${escapeHtml(applicant.email || '')}">Deny</button>
+      </div>
+    `;
+  }
+
+  if (showSingleRowDeny) {
+    return `
+      <div class="action-buttons">
+        <button type="button" class="small-btn danger" data-action="deny" data-id="${applicant.id}" data-email="${escapeHtml(applicant.email || '')}">Deny</button>
+      </div>
+    `;
+  }
+
+  return '—';
 }
 
 function renderContactedCell(applicant) {
