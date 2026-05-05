@@ -6,6 +6,9 @@ import json
 import logging
 import os
 import re
+
+import msal
+import requests
 from collections import Counter
 from datetime import datetime, timezone
 from io import BytesIO
@@ -25,6 +28,10 @@ MAKE_WEBHOOK_TOKEN = os.getenv("HR_MAKE_WEBHOOK_TOKEN", "").strip()
 RUN_INGEST_TOKEN = os.getenv("HR_RUN_INGEST_TOKEN", "").strip()
 SERVER_HOST = os.getenv("HR_HOST", "127.0.0.1").strip() or "127.0.0.1"
 SERVER_PORT = int(os.getenv("PORT") or os.getenv("HR_PORT") or "8000")
+CLIENT_ID = os.getenv("CLIENT_ID", "").strip()
+CLIENT_SECRET = os.getenv("CLIENT_SECRET", "").strip()
+TENANT_ID = os.getenv("TENANT_ID", "").strip()
+MAILBOX_EMAIL = os.getenv("MAILBOX_EMAIL", "").strip()
 
 INDEX_HTML = ROOT / "index.html"
 STATIC_JS = ROOT / "app.js"

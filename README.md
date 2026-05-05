@@ -68,7 +68,7 @@ python3 email_ingest.py
 
 Behavior:
 - Scans the main Inbox.
-- `/run-ingest` defaults to scanning both Inbox and `processed` folders (`source_folder=all`).
+- `/run-ingest` defaults to scanning Inbox only (`source_folder=inbox`).
 - Processes messages where sender equals `JOB_APP_SENDER` and subject contains `JOB_APP_SUBJECT_CONTAINS` (case-insensitive).
 - Parses fixed labels: Name, Email, Phone Number, Primary Position You Are Applying For, Other Interested Positions.
 - Stores `other_positions` as JSON array split by comma/newline.

@@ -114,18 +114,11 @@ function renderTable(applicants) {
   els.applicantRows.innerHTML = applicants
     .map((applicant) => {
       const primary = shortenPosition(cleanDisplayPosition(applicant.primaryPosition || '—'));
-      const other = applicant.otherPositions?.length
-        ? applicant.otherPositions
-            .map((value) => shortenPosition(cleanDisplayPosition(value)))
-            .filter((value) => value && value !== '—')
-            .join(', ')
-        : '—';
       return `<tr>
         <td><input type="checkbox" data-select-id="${applicant.id}" ${state.selectedIds.has(applicant.id) ? 'checked' : ''} /></td>
         <td>${escapeHtml(applicant.name)}</td>
         <td>${formatDate(applicant.submittedAt)}</td>
         <td>${escapeHtml(primary)}</td>
-        <td>${escapeHtml(other)}</td>
         <td>${escapeHtml(applicant.status || '—')}</td>
         <td>${escapeHtml(applicant.email || '—')}</td>
         <td>${escapeHtml(applicant.phone || '—')}</td>
