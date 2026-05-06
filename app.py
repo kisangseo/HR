@@ -668,11 +668,23 @@ def upsert_background_record(cursor, mapped: dict[str, Any], payload: dict[str, 
                 raw_payload = ?,
                 background_pdf_url = COALESCE(NULLIF(?, ''), background_pdf_url),
                 background_document_url = COALESCE(NULLIF(?, ''), background_document_url),
+                drivers_license_document_urls = COALESCE(NULLIF(?, ''), drivers_license_document_urls),
+                dd214_document_urls = COALESCE(NULLIF(?, ''), dd214_document_urls),
+                diploma_document_urls = COALESCE(NULLIF(?, ''), diploma_document_urls),
                 background_submitted_at = COALESCE(TRY_CAST(? AS DATETIME2), background_submitted_at),
                 last_cognito_sync_at = SYSUTCDATETIME()
             WHERE id = ?
             """,
-            (json.dumps(payload), clean_text(payload.get("background_pdf_url")), clean_text(payload.get("background_document_url")), payload.get("cognito_date_submitted"), app_id),
+            (
+                json.dumps(payload),
+                clean_text(payload.get("background_pdf_url")),
+                clean_text(payload.get("background_document_url")),
+                json.dumps(extract_file_urls(payload.get("drivers_license_files") or payload.get("drivers_license_urls") or payload.get("drivers_license_document_urls") or payload.get("drivers_license_document_url"))),
+                json.dumps(extract_file_urls(payload.get("dd214_files") or payload.get("dd214_urls") or payload.get("dd214_document_urls") or payload.get("dd214_document_url"))),
+                json.dumps(extract_file_urls(payload.get("diploma_files") or payload.get("diploma_urls") or payload.get("diploma_document_urls") or payload.get("diploma_document_url"))),
+                payload.get("cognito_date_submitted"),
+                app_id,
+            ),
         )
     return app_id
 
@@ -689,6 +701,31 @@ def parse_json_body(raw_body: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("JSON body must be an object.")
     return payload
+
+
+def extract_file_urls(value: Any) -> list[str]:
+    urls: list[str] = []
+    if value is None:
+        return urls
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            urls.append(text)
+        return urls
+    if isinstance(value, dict):
+        candidate = clean_text(value.get("file") or value.get("url"))
+        if candidate:
+            urls.append(candidate)
+        return urls
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict):
+                candidate = clean_text(item.get("file") or item.get("url"))
+            else:
+                candidate = clean_text(item)
+            if candidate:
+                urls.append(candidate)
+    return urls
 
 
 def build_record_from_make(payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -881,7 +918,20 @@ def ingest_csv(csv_text: str) -> dict[str, Any]:
 
 
 
-def build_document_links(cognito_pdf_url: Any, cognito_document_link: Any, background_pdf_url: Any, background_document_url: Any, resume_file_url: Any) -> list[dict[str, str]]:
+def parse_json_array_text(raw: Any) -> list[str]:
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item).strip() for item in parsed if str(item).strip()]
+
+
+def build_document_links(cognito_pdf_url: Any, cognito_document_link: Any, background_pdf_url: Any, background_document_url: Any, resume_file_url: Any, drivers_license_document_urls: Any, dd214_document_urls: Any, diploma_document_urls: Any) -> list[dict[str, str]]:
     links: list[dict[str, str]] = []
 
     def add(label: str, url: Any):
@@ -895,6 +945,12 @@ def build_document_links(cognito_pdf_url: Any, cognito_document_link: Any, backg
     add("Initial Application", cognito_document_link)
     add("Background Check Form", background_pdf_url)
     add("Resume", resume_file_url)
+    for url in parse_json_array_text(drivers_license_document_urls):
+        add("Driver License", url)
+    for url in parse_json_array_text(dd214_document_urls):
+        add("DD214", url)
+    for url in parse_json_array_text(diploma_document_urls):
+        add("Diploma", url)
 
     return links
 
@@ -903,7 +959,7 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
     sql = """
         SELECT
             id, submitted_at, full_name, email, phone,
-            primary_position, other_positions, status, source, cognito_pdf_url, cognito_document_link, background_pdf_url, background_document_url, resume_file_url, contacted, denied
+            primary_position, other_positions, status, source, cognito_pdf_url, cognito_document_link, background_pdf_url, background_document_url, resume_file_url, drivers_license_document_urls, dd214_document_urls, diploma_document_urls, contacted, denied
         FROM dbo.job_applications
         WHERE 1 = 1
     """
@@ -976,12 +1032,12 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
                 "phone": normalize_phone(str(row[4] or "")),
                 "primaryPosition": primary_clean,
                 "otherPositions": list(dict.fromkeys(other_clean)),
-                "status": "Denied" if bool(row[15]) else normalize_status_label(row[7]),
+                "status": "Denied" if bool(row[18]) else normalize_status_label(row[7]),
                 "source": row[8],
                 "cognitoPdfUrl": row[9],
                 "cognitoDocumentLink": row[10],
-                "documents": build_document_links(row[9], row[10], row[11], row[12], row[13]),
-                "contacted": bool(row[14]) if row[14] is not None else False,
+                "documents": build_document_links(row[9], row[10], row[11], row[12], row[13], row[14], row[15], row[16]),
+                "contacted": bool(row[17]) if row[17] is not None else False,
             }
         )
     # Smart presentation layer:
