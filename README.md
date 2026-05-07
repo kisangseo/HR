@@ -129,6 +129,37 @@ This repo now exposes a WSGI callable named `app` in `app.py`, so Oryx/Gunicorn 
    - `other_positions` (array or comma-separated string)
    - `submission_date` (optional; fallback is current UTC date)
 
+### Additional documents webhook (`/api/job-app-docs`)
+
+Use this endpoint for the Cognito "Applicant Document Submission" form to attach new document URLs to an existing applicant.
+
+- Method: `POST`
+- URL: `http://YOUR_HOST:8000/api/job-app-docs`
+- Optional auth header: `X-Webhook-Token: <HR_MAKE_WEBHOOK_TOKEN>`
+- Match behavior:
+  - Required: `email`
+  - No new applicant is created when no match is found.
+
+Suggested JSON payload:
+
+```json
+{
+  "name": "First Last",
+  "first_name": "First",
+  "last_name": "Last",
+  "email": "person@example.gov",
+  "birth_certificate": "https://...",
+  "passport": "https://...",
+  "social_security_front": "https://...",
+  "social_security_back": "https://...",
+  "credit_report_pdf": "https://...",
+  "submission_date": "2026-05-06",
+  "cognito_admin_link": "https://..."
+}
+```
+
+Document URLs are appended by type; duplicate URLs are ignored while new URLs in the same request are still added.
+
 ## Notes about your conditional position fields
 
 When multiple duplicate "Other Interested Positions" columns exist in a CSV export,
