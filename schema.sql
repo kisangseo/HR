@@ -54,6 +54,41 @@ BEGIN
 END;
 GO
 
+IF COL_LENGTH('dbo.job_applications', 'social_security_front_document_urls') IS NULL
+BEGIN
+  ALTER TABLE dbo.job_applications
+    ADD social_security_front_document_urls NVARCHAR(MAX) NULL;
+END;
+GO
+
+IF COL_LENGTH('dbo.job_applications', 'social_security_back_document_urls') IS NULL
+BEGIN
+  ALTER TABLE dbo.job_applications
+    ADD social_security_back_document_urls NVARCHAR(MAX) NULL;
+END;
+GO
+
+IF COL_LENGTH('dbo.job_applications', 'credit_report_document_urls') IS NULL
+BEGIN
+  ALTER TABLE dbo.job_applications
+    ADD credit_report_document_urls NVARCHAR(MAX) NULL;
+END;
+GO
+
+IF COL_LENGTH('dbo.job_applications', 'birth_certificate_document_urls') IS NULL
+BEGIN
+  ALTER TABLE dbo.job_applications
+    ADD birth_certificate_document_urls NVARCHAR(MAX) NULL;
+END;
+GO
+
+IF COL_LENGTH('dbo.job_applications', 'passport_document_urls') IS NULL
+BEGIN
+  ALTER TABLE dbo.job_applications
+    ADD passport_document_urls NVARCHAR(MAX) NULL;
+END;
+GO
+
 IF NOT EXISTS (
   SELECT 1
   FROM sys.check_constraints
