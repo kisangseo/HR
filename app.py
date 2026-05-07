@@ -704,10 +704,13 @@ def upsert_job_app_docs(cursor, payload: dict[str, Any]) -> dict[str, Any]:
                passport_document_urls
         FROM dbo.job_applications
         WHERE
-          (? <> '' AND LOWER(LTRIM(RTRIM(COALESCE(email_norm, '')))) = ?)
+          (? <> '' AND (
+            LOWER(LTRIM(RTRIM(COALESCE(email_norm, '')))) = ?
+            OR LOWER(LTRIM(RTRIM(COALESCE(email, '')))) = ?
+          ))
         ORDER BY COALESCE(updated_at, created_at) DESC
         """,
-        (email_norm, email_norm),
+        (email_norm, email_norm, email_norm),
     ).fetchone()
     if not row:
         raise LookupError("No matching applicant found for provided email.")
@@ -735,6 +738,7 @@ def upsert_job_app_docs(cursor, payload: dict[str, Any]) -> dict[str, Any]:
             passport_document_urls = ?,
             raw_payload = ?,
             source = COALESCE(NULLIF(?, ''), source),
+            email_norm = NULLIF(?, ''),
             last_cognito_sync_at = SYSUTCDATETIME()
         WHERE id = ?
         """,
@@ -746,6 +750,7 @@ def upsert_job_app_docs(cursor, payload: dict[str, Any]) -> dict[str, Any]:
             json.dumps(passport),
             json.dumps(payload),
             "job-app-docs",
+            email_norm,
             app_id,
         ),
     )
