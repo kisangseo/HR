@@ -689,6 +689,74 @@ def upsert_background_record(cursor, mapped: dict[str, Any], payload: dict[str, 
     return app_id
 
 
+def upsert_job_app_docs(cursor, payload: dict[str, Any]) -> dict[str, Any]:
+    email_norm = normalize_email(str(payload.get("email") or ""))
+    if not email_norm:
+        raise ValueError("email is required.")
+
+    row = cursor.execute(
+        """
+        SELECT TOP 1 id,
+               social_security_front_document_urls,
+               social_security_back_document_urls,
+               credit_report_document_urls,
+               birth_certificate_document_urls,
+               passport_document_urls
+        FROM dbo.job_applications
+        WHERE
+          (? <> '' AND (
+            LOWER(LTRIM(RTRIM(COALESCE(email_norm, '')))) = ?
+            OR LOWER(LTRIM(RTRIM(COALESCE(email, '')))) = ?
+          ))
+        ORDER BY COALESCE(updated_at, created_at) DESC
+        """,
+        (email_norm, email_norm, email_norm),
+    ).fetchone()
+    if not row:
+        raise LookupError("No matching applicant found for provided email.")
+
+    def merged(existing_value: Any, incoming_value: Any) -> list[str]:
+        existing = extract_file_urls(existing_value)
+        for url in extract_file_urls(incoming_value):
+            if url not in existing:
+                existing.append(url)
+        return existing
+
+    app_id = int(row[0])
+    ss_front = merged(row[1], payload.get("social_security_front"))
+    ss_back = merged(row[2], payload.get("social_security_back"))
+    credit_report = merged(row[3], payload.get("credit_report_pdf"))
+    birth_certificate = merged(row[4], payload.get("birth_certificate"))
+    passport = merged(row[5], payload.get("passport"))
+    cursor.execute(
+        """
+        UPDATE dbo.job_applications
+        SET social_security_front_document_urls = ?,
+            social_security_back_document_urls = ?,
+            credit_report_document_urls = ?,
+            birth_certificate_document_urls = ?,
+            passport_document_urls = ?,
+            raw_payload = ?,
+            source = COALESCE(NULLIF(?, ''), source),
+            email_norm = NULLIF(?, ''),
+            last_cognito_sync_at = SYSUTCDATETIME()
+        WHERE id = ?
+        """,
+        (
+            json.dumps(ss_front),
+            json.dumps(ss_back),
+            json.dumps(credit_report),
+            json.dumps(birth_certificate),
+            json.dumps(passport),
+            json.dumps(payload),
+            "job-app-docs",
+            email_norm,
+            app_id,
+        ),
+    )
+    return {"job_application_id": app_id, "updated": 1}
+
+
 def parse_json_body(raw_body: str) -> dict[str, Any]:
     try:
         payload = json.loads(raw_body)
@@ -931,7 +999,7 @@ def parse_json_array_text(raw: Any) -> list[str]:
     return [str(item).strip() for item in parsed if str(item).strip()]
 
 
-def build_document_links(cognito_pdf_url: Any, cognito_document_link: Any, background_pdf_url: Any, background_document_url: Any, resume_file_url: Any, drivers_license_document_urls: Any, dd214_document_urls: Any, diploma_document_urls: Any) -> list[dict[str, str]]:
+def build_document_links(cognito_pdf_url: Any, cognito_document_link: Any, background_pdf_url: Any, background_document_url: Any, resume_file_url: Any, drivers_license_document_urls: Any, dd214_document_urls: Any, diploma_document_urls: Any, social_security_front_document_urls: Any, social_security_back_document_urls: Any, credit_report_document_urls: Any, birth_certificate_document_urls: Any, passport_document_urls: Any) -> list[dict[str, str]]:
     links: list[dict[str, str]] = []
 
     def add(label: str, url: Any):
@@ -951,6 +1019,16 @@ def build_document_links(cognito_pdf_url: Any, cognito_document_link: Any, backg
         add("DD214", url)
     for url in parse_json_array_text(diploma_document_urls):
         add("Diploma", url)
+    for url in parse_json_array_text(social_security_front_document_urls):
+        add("Social Security - Front", url)
+    for url in parse_json_array_text(social_security_back_document_urls):
+        add("Social Security - Back", url)
+    for url in parse_json_array_text(credit_report_document_urls):
+        add("Credit Report", url)
+    for url in parse_json_array_text(birth_certificate_document_urls):
+        add("Birth Certificate", url)
+    for url in parse_json_array_text(passport_document_urls):
+        add("Passport", url)
 
     return links
 
@@ -959,7 +1037,7 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
     sql = """
         SELECT
             id, submitted_at, full_name, email, phone,
-            primary_position, other_positions, status, source, cognito_pdf_url, cognito_document_link, background_pdf_url, background_document_url, resume_file_url, drivers_license_document_urls, dd214_document_urls, diploma_document_urls, contacted, denied
+            primary_position, other_positions, status, source, cognito_pdf_url, cognito_document_link, background_pdf_url, background_document_url, resume_file_url, drivers_license_document_urls, dd214_document_urls, diploma_document_urls, social_security_front_document_urls, social_security_back_document_urls, credit_report_document_urls, birth_certificate_document_urls, passport_document_urls, contacted, denied
         FROM dbo.job_applications
         WHERE 1 = 1
     """
@@ -1032,12 +1110,12 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
                 "phone": normalize_phone(str(row[4] or "")),
                 "primaryPosition": primary_clean,
                 "otherPositions": list(dict.fromkeys(other_clean)),
-                "status": "Denied" if bool(row[18]) else normalize_status_label(row[7]),
+                "status": "Denied" if bool(row[23]) else normalize_status_label(row[7]),
                 "source": row[8],
                 "cognitoPdfUrl": row[9],
                 "cognitoDocumentLink": row[10],
-                "documents": build_document_links(row[9], row[10], row[11], row[12], row[13], row[14], row[15], row[16]),
-                "contacted": bool(row[17]) if row[17] is not None else False,
+                "documents": build_document_links(row[9], row[10], row[11], row[12], row[13], row[14], row[15], row[16], row[17], row[18], row[19], row[20], row[21]),
+                "contacted": bool(row[22]) if row[22] is not None else False,
             }
         )
     # Smart presentation layer:
@@ -1473,6 +1551,25 @@ def app(environ, start_response):
                 logging.exception("/api/ingest-cognito-form failed")
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
 
+        if path == "/api/job-app-docs":
+            if not body_text.strip():
+                return _wsgi_json(start_response, {"error": "JSON payload is empty."}, 400)
+            provided_token = environ.get("HTTP_X_WEBHOOK_TOKEN", "")
+            if MAKE_WEBHOOK_TOKEN and provided_token != MAKE_WEBHOOK_TOKEN:
+                return _wsgi_json(start_response, {"error": "Unauthorized webhook token."}, 401)
+            try:
+                payload = parse_json_body(body_text)
+                with get_sql_connection() as conn:
+                    cursor = conn.cursor()
+                    result = upsert_job_app_docs(cursor, payload)
+                    conn.commit()
+                return _wsgi_json(start_response, {"source": "job-app-docs", **result})
+            except LookupError as exc:
+                return _wsgi_json(start_response, {"error": str(exc)}, 404)
+            except Exception as exc:
+                logging.exception("/api/job-app-docs failed")
+                return _wsgi_json(start_response, {"error": str(exc)}, 500)
+
         if path == "/api/ingest-csv":
             # CSV ingest is intentionally disabled for now to avoid manual user uploads.
             # Legacy handler kept commented for quick restore:
@@ -1737,6 +1834,30 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"inserted": 1, "source": "cognito", "job_application_id": app_id})
             except Exception as exc:
                 logging.exception("/api/ingest-cognito-form failed")
+                self._send_json({"error": str(exc)}, 500)
+            return
+
+        if parsed.path == "/api/job-app-docs":
+            content_length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(content_length).decode("utf-8")
+            if not body.strip():
+                self._send_json({"error": "JSON payload is empty."}, 400)
+                return
+            provided_token = self.headers.get("X-Webhook-Token", "")
+            if MAKE_WEBHOOK_TOKEN and provided_token != MAKE_WEBHOOK_TOKEN:
+                self._send_json({"error": "Unauthorized webhook token."}, 401)
+                return
+            try:
+                payload = parse_json_body(body)
+                with get_sql_connection() as conn:
+                    cursor = conn.cursor()
+                    result = upsert_job_app_docs(cursor, payload)
+                    conn.commit()
+                self._send_json({"source": "job-app-docs", **result})
+            except LookupError as exc:
+                self._send_json({"error": str(exc)}, 404)
+            except Exception as exc:
+                logging.exception("/api/job-app-docs failed")
                 self._send_json({"error": str(exc)}, 500)
             return
 
