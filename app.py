@@ -693,18 +693,9 @@ def upsert_job_app_docs(cursor, payload: dict[str, Any]) -> dict[str, Any]:
     email_norm = normalize_email(str(payload.get("email") or ""))
     if not email_norm:
         raise ValueError("email is required.")
-    first_name = str(payload.get("first_name") or "").strip()
-    last_name = str(payload.get("last_name") or "").strip()
     full_name = str(payload.get("name") or payload.get("full_name") or "").strip()
-    if (not first_name or not last_name) and full_name:
-        parts = full_name.split(maxsplit=1)
-        if parts:
-            first_name = first_name or parts[0]
-            if len(parts) > 1:
-                last_name = last_name or parts[1]
-    first_norm = normalize_name(first_name)
-    last_norm = normalize_name(last_name)
-    require_name_match = bool(first_norm and last_norm)
+    full_name_norm = normalize_name(full_name)
+    require_name_match = bool(full_name_norm)
 
     row = cursor.execute(
         """
@@ -723,12 +714,7 @@ def upsert_job_app_docs(cursor, payload: dict[str, Any]) -> dict[str, Any]:
           AND (
             ? = 0
             OR (
-              LOWER(LTRIM(RTRIM(COALESCE(first_name_norm, '')))) = ?
-              AND LOWER(LTRIM(RTRIM(COALESCE(last_name_norm, '')))) = ?
-            )
-            OR (
-              LOWER(LTRIM(RTRIM(COALESCE(first_name, '')))) = ?
-              AND LOWER(LTRIM(RTRIM(COALESCE(last_name, '')))) = ?
+              LOWER(LTRIM(RTRIM(COALESCE(full_name, '')))) = ?
             )
           )
         ORDER BY COALESCE(updated_at, created_at) DESC
@@ -738,10 +724,7 @@ def upsert_job_app_docs(cursor, payload: dict[str, Any]) -> dict[str, Any]:
             email_norm,
             email_norm,
             1 if require_name_match else 0,
-            first_norm,
-            last_norm,
-            first_norm,
-            last_norm,
+            full_name_norm,
         ),
     ).fetchone()
     if not row:
