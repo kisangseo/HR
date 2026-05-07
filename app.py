@@ -691,10 +691,8 @@ def upsert_background_record(cursor, mapped: dict[str, Any], payload: dict[str, 
 
 def upsert_job_app_docs(cursor, payload: dict[str, Any]) -> dict[str, Any]:
     email_norm = normalize_email(str(payload.get("email") or ""))
-    first_norm = normalize_name(str(payload.get("first_name") or ""))
-    last_norm = normalize_name(str(payload.get("last_name") or ""))
-    if not email_norm and not (first_norm and last_norm):
-        raise ValueError("email or first_name + last_name is required.")
+    if not email_norm:
+        raise ValueError("email is required.")
 
     row = cursor.execute(
         """
@@ -707,14 +705,12 @@ def upsert_job_app_docs(cursor, payload: dict[str, Any]) -> dict[str, Any]:
         FROM dbo.job_applications
         WHERE
           (? <> '' AND LOWER(LTRIM(RTRIM(COALESCE(email_norm, '')))) = ?)
-          OR
-          (? <> '' AND ? <> '' AND LOWER(LTRIM(RTRIM(COALESCE(first_name_norm, '')))) = ? AND LOWER(LTRIM(RTRIM(COALESCE(last_name_norm, '')))) = ?)
         ORDER BY COALESCE(updated_at, created_at) DESC
         """,
-        (email_norm, email_norm, first_norm, last_norm, first_norm, last_norm),
+        (email_norm, email_norm),
     ).fetchone()
     if not row:
-        raise LookupError("No matching applicant found for provided email/name.")
+        raise LookupError("No matching applicant found for provided email.")
 
     def merged(existing_value: Any, incoming_value: Any) -> list[str]:
         existing = extract_file_urls(existing_value)

@@ -137,8 +137,7 @@ Use this endpoint for the Cognito "Applicant Document Submission" form to attach
 - URL: `http://YOUR_HOST:8000/api/job-app-docs`
 - Optional auth header: `X-Webhook-Token: <HR_MAKE_WEBHOOK_TOKEN>`
 - Match behavior:
-  - Primary: `email`
-  - Fallback: `first_name` + `last_name`
+  - Required: `email`
   - No new applicant is created when no match is found.
 
 Suggested JSON payload:
