@@ -237,8 +237,13 @@ def normalize_status_label(value: Any) -> str:
     lowered = text.lower()
     if lowered in {'interest_submitted', 'interest form submitted', 'interest submitted'}:
         return 'Interest Submitted'
-    if lowered in {'approval needed for background check', 'needs approval'}:
-        return 'Needs Approval'
+    if lowered in {'approval needed for background check', 'needs approval', 'needs attention'}:
+        return 'Needs Attention'
+
+    if lowered in {'needs approval - approved', 'needs attention - approved'}:
+        return 'Needs Attention - Approved'
+    if lowered in {'needs approval - denied', 'needs attention - denied'}:
+        return 'Needs Attention - Denied'
     if lowered in {'application/consent to background submitted', 'approved - background check sent', 'background check sent'}:
         return 'Background Check Sent'
     return text
@@ -519,7 +524,7 @@ def upsert_cognito_record(cursor, mapped: dict[str, Any], payload: dict[str, Any
         currently_under_charges,
         unlawful_drug_use_last_3y,
     )
-    status = "Needs Approval" if any(value == 1 for value in flagged_responses) else "Background Check Sent"
+    status = "Needs Attention" if any(value == 1 for value in flagged_responses) else "Background Check Sent"
 
     if candidates:
         app_id = int(candidates[0])
@@ -1103,7 +1108,7 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
         ORDER BY
             CASE
                 WHEN status = 'Background Check Submitted' THEN 1
-                WHEN status = 'Needs Approval' THEN 2
+                WHEN status = 'Needs Attention' THEN 2
                 ELSE 3
             END,
             submitted_at ASC
@@ -1246,7 +1251,7 @@ def query_statuses() -> list[str]:
 def _approve_or_deny_application(application_id: int, action: str) -> None:
     action_value = (action or "").strip().lower()
     if action_value == "approve":
-        new_status = "Needs Approval - Approved"
+        new_status = "Needs Attention - Approved"
         sql = """
             UPDATE dbo.job_applications
             SET status = ?,
