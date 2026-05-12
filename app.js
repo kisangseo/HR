@@ -158,13 +158,15 @@ function toggleSelectAllVisible() {
 async function denySelectedApplicants() {
   const visibleIds = state.applicants.map((item) => item.id).filter((id) => state.selectedIds.has(id));
   if (!visibleIds.length) return;
+  const denialType = chooseDenialType();
+  if (!denialType) return;
   if (!window.confirm(`Deny ${visibleIds.length} selected applicant(s)?`)) return;
   els.denySelectedBtn.disabled = true;
   try {
     const response = await fetch('/api/applicants/deny', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids: visibleIds })
+      body: JSON.stringify({ ids: visibleIds, denial_type: denialType })
     });
     const payload = await readJsonResponse(response, 'Failed to deny selected applicants');
     if (!response.ok) throw new Error(payload.error || 'Failed to deny selected applicants');
@@ -324,7 +326,7 @@ function renderActionCell(applicant) {
       </div>
     `;
   }
-  if (status !== 'needs approval') return '—';
+  if (status !== 'needs attention') return '—';
   return `
     <div class="action-buttons">
       <button type="button" class="small-btn" data-action="approve" data-id="${applicant.id}" data-email="${escapeHtml(applicant.email || '')}">Approve</button>
@@ -343,10 +345,14 @@ els.applicantRows.addEventListener('click', async (event) => {
   if (!btn) return;
   const action = btn.getAttribute('data-action');
   const id = btn.getAttribute('data-id');
+  const denialType = action === 'deny' ? chooseDenialType() : null;
+  if (action === 'deny' && !denialType) return;
   btn.disabled = true;
   try {
     const response = await fetch(`/api/applicants/${id}/${action}`, {
       method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: action === 'deny' ? JSON.stringify({ denial_type: denialType }) : undefined
     });
     await readJsonResponse(response, 'Action failed');
     await loadApplicants();
@@ -356,6 +362,15 @@ els.applicantRows.addEventListener('click', async (event) => {
     btn.disabled = false;
   }
 });
+
+function chooseDenialType() {
+  const selection = window.prompt('Choose denial type: enter "1" for Permanent or "2" for Soft.');
+  const value = String(selection || '').trim().toLowerCase();
+  if (value === '1' || value === 'permanent') return 'permanent';
+  if (value === '2' || value === 'soft') return 'soft';
+  alert('Denial canceled. Please enter 1 (Permanent) or 2 (Soft).');
+  return null;
+}
 
 els.applicantRows.addEventListener('change', async (event) => {
   const selectCheckbox = event.target.closest('input[type="checkbox"][data-select-id]');

@@ -32,6 +32,8 @@ CLIENT_ID = os.getenv("CLIENT_ID", "").strip()
 CLIENT_SECRET = os.getenv("CLIENT_SECRET", "").strip()
 TENANT_ID = os.getenv("TENANT_ID", "").strip()
 MAILBOX_EMAIL = os.getenv("MAILBOX_EMAIL", "").strip()
+GRAPH_BASE = "https://graph.microsoft.com/v1.0"
+GRAPH_SCOPE = ["https://graph.microsoft.com/.default"]
 
 INDEX_HTML = ROOT / "index.html"
 STATIC_JS = ROOT / "app.js"
@@ -1277,16 +1279,97 @@ def _approve_or_deny_application(application_id: int, action: str) -> None:
         conn.commit()
 
 
-def _deny_applications(application_ids: list[int]) -> int:
+def _get_graph_access_token() -> str:
+    if not all([CLIENT_ID, CLIENT_SECRET, TENANT_ID]):
+        raise RuntimeError("CLIENT_ID, CLIENT_SECRET, and TENANT_ID must be set.")
+    authority = f"https://login.microsoftonline.com/{TENANT_ID}"
+    oauth_app = msal.ConfidentialClientApplication(
+        client_id=CLIENT_ID,
+        authority=authority,
+        client_credential=CLIENT_SECRET,
+    )
+    result = oauth_app.acquire_token_for_client(scopes=GRAPH_SCOPE)
+    token = result.get("access_token")
+    if not token:
+        raise RuntimeError(f"Failed to obtain Graph access token: {result}")
+    return token
+
+
+def _build_denial_email_body(applicant_name: str, denial_type: str) -> str:
+    safe_name = (applicant_name or "Applicant").strip()
+    if denial_type == "permanent":
+        return (
+            f"Dear {safe_name},\n\n"
+            "Thank you for your interest in employment with the Baltimore City Sheriff’s Office and for the time and effort you invested in the application process.\n\n"
+            "After review of your background application and supporting materials, we regret to inform you that you will not be moving forward in the hiring process with the Baltimore City Sheriff’s Office.\n\n"
+            "We appreciate your interest in serving the citizens of Baltimore City and thank you for considering our agency for employment.\n\n"
+            "We wish you the best in your future professional endeavors.\n\n"
+            "Respectfully,\nBaltimore City Sheriff's Office"
+        )
+    return (
+        f"Dear {safe_name},\n\n"
+        "Thank you for your interest in employment with the Baltimore City Sheriff’s Office and for the time and effort you invested throughout the application and selection process.\n\n"
+        "After careful review and consideration of all applicants, we regret to inform you that you were not selected to move forward in the hiring process at this time. This decision was made after evaluating a highly competitive pool of candidates and was not an easy one.\n\n"
+        "Please know that your interest in serving the citizens of Baltimore City and pursuing a career in law enforcement is sincerely appreciated. We recognize the commitment required to seek a position in public safety, and we thank you for your willingness to serve.\n\n"
+        "Your application will remain on file for three (3) months, should additional opportunities become available that align with your qualifications and experience. We also encourage you to apply for future openings with the Baltimore City Sheriff’s Office.\n\n"
+        "We appreciate your interest in our agency and wish you continued success in your professional and personal endeavors.\n\n"
+        "Respectfully,\n\nHuman Resources"
+    )
+
+
+def _send_denial_email(to_email: str, applicant_name: str, denial_type: str) -> None:
+    if not MAILBOX_EMAIL:
+        raise RuntimeError("MAILBOX_EMAIL is not set.")
+    token = _get_graph_access_token()
+    subject = "Baltimore City Sheriff's Office Application Status"
+    content = _build_denial_email_body(applicant_name, denial_type)
+    endpoint = f"{GRAPH_BASE}/users/{MAILBOX_EMAIL}/sendMail"
+    payload = {
+        "message": {
+            "subject": subject,
+            "body": {"contentType": "Text", "content": content},
+            "toRecipients": [{"emailAddress": {"address": to_email}}],
+        },
+        "saveToSentItems": True,
+    }
+    response = requests.post(
+        endpoint,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=30,
+    )
+    if response.status_code >= 300:
+        raise RuntimeError(f"Failed to send denial email: {response.status_code} {response.text}")
+
+
+def _deny_applications(application_ids: list[int], denial_type: str) -> int:
     ids = sorted({int(value) for value in application_ids if int(value) > 0})
     if not ids:
         return 0
+    if denial_type not in {"permanent", "soft"}:
+        raise ValueError("Invalid denial type.")
     placeholders = ",".join("?" for _ in ids)
+    status_value = "Needs Attention - Denied (Permanent)" if denial_type == "permanent" else "Needs Attention - Denied (Soft)"
     with get_sql_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            f"UPDATE dbo.job_applications SET denied = 1 WHERE id IN ({placeholders})",
+        rows = cursor.execute(
+            f"SELECT id, full_name, email FROM dbo.job_applications WHERE id IN ({placeholders})",
             ids,
+        ).fetchall()
+        for row in rows:
+            to_email = extract_first_email(str(row[2] or ""))
+            if not to_email:
+                raise RuntimeError(f"Applicant id {row[0]} is missing a valid email.")
+            _send_denial_email(to_email, str(row[1] or "Applicant"), denial_type)
+        cursor.execute(
+            f"""UPDATE dbo.job_applications
+            SET denied = 1,
+                status = ?,
+                denial_type = ?,
+                denial_sent_at = SYSUTCDATETIME(),
+                denial_sent_to = COALESCE(NULLIF(email, ''), denial_sent_to)
+            WHERE id IN ({placeholders})""",
+            [status_value, denial_type, *ids],
         )
         conn.commit()
         return int(cursor.rowcount or 0)
@@ -1470,10 +1553,11 @@ def app(environ, start_response):
             except Exception:
                 return _wsgi_json(start_response, {"error": "Invalid JSON payload."}, 400)
             ids = payload.get("ids") if isinstance(payload, dict) else []
+            denial_type = str(payload.get("denial_type") or "").strip().lower()
             if not isinstance(ids, list):
                 return _wsgi_json(start_response, {"error": "Expected 'ids' array."}, 400)
             try:
-                denied_count = _deny_applications([int(value) for value in ids])
+                denied_count = _deny_applications([int(value) for value in ids], denial_type=denial_type)
                 return _wsgi_json(start_response, {"ok": True, "denied_count": denied_count})
             except Exception as exc:
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
@@ -1494,6 +1578,10 @@ def app(environ, start_response):
             try:
                 if action == "undo-denial":
                     _undo_denial(app_id)
+                elif action == "deny":
+                    payload = parse_json_body(body_text or "{}") if body_text else {}
+                    denial_type = str(payload.get("denial_type") or "").strip().lower()
+                    _deny_applications([app_id], denial_type=denial_type)
                 else:
                     _approve_or_deny_application(app_id, action)
                 return _wsgi_json(start_response, {"ok": True, "id": app_id, "action": action})
@@ -1725,11 +1813,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": "Invalid JSON payload."}, 400)
                 return
             ids = payload.get("ids") if isinstance(payload, dict) else []
+            denial_type = str(payload.get("denial_type") or "").strip().lower()
             if not isinstance(ids, list):
                 self._send_json({"error": "Expected 'ids' array."}, 400)
                 return
             try:
-                denied_count = _deny_applications([int(value) for value in ids])
+                denied_count = _deny_applications([int(value) for value in ids], denial_type=denial_type)
                 self._send_json({"ok": True, "denied_count": denied_count})
             except Exception as exc:
                 self._send_json({"error": str(exc)}, 500)
@@ -1759,6 +1848,12 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 if action == "undo-denial":
                     _undo_denial(app_id)
+                elif action == "deny":
+                    content_length = int(self.headers.get("Content-Length", "0"))
+                    body = self.rfile.read(content_length).decode("utf-8") if content_length > 0 else "{}"
+                    payload = parse_json_body(body or "{}")
+                    denial_type = str(payload.get("denial_type") or "").strip().lower()
+                    _deny_applications([app_id], denial_type=denial_type)
                 else:
                     _approve_or_deny_application(app_id, action)
                 self._send_json({"ok": True, "id": app_id, "action": action})
