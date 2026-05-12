@@ -139,6 +139,31 @@ th, td {
 .action-buttons { display:flex; gap:0.4rem; }
 .small-btn { padding:0.25rem 0.5rem; font-size:0.8rem; }
 .small-btn.danger { background:#8b1f1f; color:#fff; border:1px solid #8b1f1f; }
+.secondary { background: #6c7382; }
+.secondary:hover { background: #5a616f; }
+
+.modal.hidden { display: none; }
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.modal-content {
+  width: min(480px, 92vw);
+  background: #fff;
+  border-radius: 10px;
+  padding: 16px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.2);
+}
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
 
 
 tbody tr:nth-child(even) {
