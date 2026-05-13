@@ -586,10 +586,10 @@ def upsert_cognito_record(cursor, mapped: dict[str, Any], payload: dict[str, Any
     cognito_form_id = payload.get("cognito_form_id")
     cognito_entry_number = payload.get("cognito_entry_number")
     cognito_entry_id = payload.get("cognito_entry_id")
-    cognito_pdf_candidates = extract_file_urls(payload.get("cognito_pdf_url"))
-    cognito_pdf_url = clean_text(cognito_pdf_candidates[0] if cognito_pdf_candidates else payload.get("cognito_pdf_url"))
     cognito_document_candidates = extract_file_urls(payload.get("cognito_document_link"))
     cognito_document_link = clean_text(cognito_document_candidates[0] if cognito_document_candidates else payload.get("cognito_document_link"))
+    cognito_pdf_candidates = extract_file_urls(payload.get("cognito_pdf_url"))
+    cognito_pdf_url = clean_text(cognito_pdf_candidates[0] if cognito_pdf_candidates else payload.get("cognito_pdf_url"))
 
     middle_name = clean_text(payload.get("middle_name"))
     address_line1 = clean_text(payload.get("address_line1"))
@@ -738,16 +738,13 @@ def upsert_cognito_record(cursor, mapped: dict[str, Any], payload: dict[str, Any
             ),
         )
         app_id = int(inserted_row.fetchone()[0])
-        initial_application_source = cognito_document_link
-        if not initial_application_source and cognito_pdf_url:
-            logging.warning("initial_application_missing_cognito_document_link app_id=%s cognito_pdf_url=%s", app_id, cognito_pdf_url)
-            initial_application_source = cognito_pdf_url
-        if initial_application_source:
-            initial_application_source = persist_document_record(cursor, app_id, "initial_application", initial_application_source)
-            cursor.execute(
-                "UPDATE dbo.job_applications SET cognito_document_link = COALESCE(?, cognito_document_link), cognito_pdf_url = COALESCE(NULLIF(?, ''), cognito_pdf_url) WHERE id = ?",
-                (cognito_document_link or initial_application_source, initial_application_source if not cognito_document_link else cognito_pdf_url, app_id),
-            )
+        if cognito_document_link:
+            cognito_document_link = persist_document_record(cursor, app_id, "initial_application", cognito_document_link)
+            cursor.execute("UPDATE dbo.job_applications SET cognito_document_link = ? WHERE id = ?", (cognito_document_link, app_id))
+        elif cognito_pdf_url:
+            logging.info("initial_application_missing_cognito_document_link app_id=%s using_cognito_pdf_url_fallback", app_id)
+            cognito_pdf_url = persist_document_record(cursor, app_id, "initial_application", cognito_pdf_url)
+            cursor.execute("UPDATE dbo.job_applications SET cognito_document_link = ? WHERE id = ?", (cognito_pdf_url, app_id))
 
     cursor.execute(
         """
