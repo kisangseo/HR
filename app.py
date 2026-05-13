@@ -629,8 +629,6 @@ def upsert_cognito_record(cursor, mapped: dict[str, Any], payload: dict[str, Any
 
     if candidates:
         app_id = int(candidates[0])
-        if cognito_pdf_url:
-            cognito_pdf_url = persist_document_record(cursor, app_id, "initial_application", cognito_pdf_url)
         if cognito_document_link:
             cognito_document_link = persist_document_record(cursor, app_id, "initial_application", cognito_document_link)
         cursor.execute(
@@ -740,12 +738,16 @@ def upsert_cognito_record(cursor, mapped: dict[str, Any], payload: dict[str, Any
             ),
         )
         app_id = int(inserted_row.fetchone()[0])
-        if cognito_pdf_url:
-            cognito_pdf_url = persist_document_record(cursor, app_id, "initial_application", cognito_pdf_url)
-            cursor.execute("UPDATE dbo.job_applications SET cognito_pdf_url = ?, cognito_document_link = COALESCE(?, cognito_document_link) WHERE id = ?", (cognito_pdf_url, cognito_pdf_url, app_id))
-        if cognito_document_link:
-            cognito_document_link = persist_document_record(cursor, app_id, "initial_application", cognito_document_link)
-            cursor.execute("UPDATE dbo.job_applications SET cognito_document_link = ? WHERE id = ?", (cognito_document_link, app_id))
+        initial_application_source = cognito_document_link
+        if not initial_application_source and cognito_pdf_url:
+            logging.warning("initial_application_missing_cognito_document_link app_id=%s cognito_pdf_url=%s", app_id, cognito_pdf_url)
+            initial_application_source = cognito_pdf_url
+        if initial_application_source:
+            initial_application_source = persist_document_record(cursor, app_id, "initial_application", initial_application_source)
+            cursor.execute(
+                "UPDATE dbo.job_applications SET cognito_document_link = COALESCE(?, cognito_document_link), cognito_pdf_url = COALESCE(NULLIF(?, ''), cognito_pdf_url) WHERE id = ?",
+                (cognito_document_link or initial_application_source, initial_application_source if not cognito_document_link else cognito_pdf_url, app_id),
+            )
 
     cursor.execute(
         """
@@ -1294,11 +1296,10 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
         other_clean = [value for value in other_clean if value and value.lower() != primary_clean.lower()]
         if _is_cognito_link(row[10]):
             logging.warning(
-                "applicants_initial_link_still_cognito id=%s name=%s cognito_document_link=%s cognito_pdf_url=%s",
+                "applicants_initial_link_still_cognito id=%s name=%s cognito_document_link=%s",
                 row[0],
                 row[2],
                 row[10],
-                row[9],
             )
         if _is_cognito_link(row[13]):
             logging.warning(
@@ -1392,7 +1393,7 @@ def run_blob_backfill(limit: int = 200) -> dict[str, int]:
         migrated = 0
         for row in rows:
             app_id = int(row[0])
-            for doc_type, col_idx, col_name in [("initial_application", 1, "cognito_pdf_url"), ("initial_application", 2, "cognito_document_link"), ("background_check_form", 3, "background_pdf_url"), ("resume", 4, "resume_file_url")]:
+            for doc_type, col_idx, col_name in [("initial_application", 2, "cognito_document_link"), ("background_check_form", 3, "background_pdf_url"), ("resume", 4, "resume_file_url")]:
                 original = clean_text(row[col_idx])
                 if not original:
                     continue
