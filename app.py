@@ -934,6 +934,15 @@ def persist_document_record(cursor, app_id: int, document_type: str, source_url:
         """,
         (app_id, document_type, source_url, blob_name, blob_url, status, error, needs_manual, status),
     )
+    logging.info(
+        "document_persist app_id=%s document_type=%s status=%s needs_manual=%s blob_name=%s error=%s",
+        app_id,
+        document_type,
+        status,
+        needs_manual,
+        blob_name,
+        error,
+    )
     return blob_url or source_url
 
 
@@ -1347,6 +1356,43 @@ def run_blob_backfill(limit: int = 200) -> dict[str, int]:
     return {"processed": len(rows), "migrated": migrated, "manual_required": manual_count}
 
 
+def get_blob_backfill_status() -> dict[str, Any]:
+    with get_sql_connection() as conn:
+        cursor = conn.cursor()
+        rows = cursor.execute(
+            """
+            SELECT status, COUNT(*)
+            FROM dbo.job_application_documents
+            GROUP BY status
+            """
+        ).fetchall()
+        by_status = {str(row[0] or "unknown"): int(row[1]) for row in rows}
+        manual_row = cursor.execute("SELECT COUNT(*) FROM dbo.job_application_documents WHERE needs_manual = 1").fetchone()
+        recent_manual = cursor.execute(
+            """
+            SELECT TOP 20 id, job_application_id, document_type, source_url, error_message, last_attempt_at
+            FROM dbo.job_application_documents
+            WHERE needs_manual = 1
+            ORDER BY COALESCE(last_attempt_at, created_at) DESC
+            """
+        ).fetchall()
+    return {
+        "status_counts": by_status,
+        "manual_required_count": int(manual_row[0]) if manual_row else 0,
+        "manual_required_recent": [
+            {
+                "id": int(row[0]),
+                "job_application_id": int(row[1]),
+                "document_type": str(row[2] or ""),
+                "source_url": str(row[3] or ""),
+                "error_message": str(row[4] or ""),
+                "last_attempt_at": str(row[5] or ""),
+            }
+            for row in recent_manual
+        ],
+    }
+
+
 def query_job_titles() -> list[str]:
     sql = """
         SELECT DISTINCT primary_position
@@ -1673,6 +1719,15 @@ def app(environ, start_response):
                 return _wsgi_json(start_response, {"statuses": statuses})
             except Exception as exc:
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
+        if path == "/api/admin/backfill-azure-status":
+            provided_token = environ.get("HTTP_X_WEBHOOK_TOKEN", "")
+            if MAKE_WEBHOOK_TOKEN and provided_token != MAKE_WEBHOOK_TOKEN:
+                return _wsgi_json(start_response, {"error": "Unauthorized webhook token."}, 401)
+            try:
+                return _wsgi_json(start_response, {"source": "backfill-azure-status", **get_blob_backfill_status()})
+            except Exception as exc:
+                logging.exception("/api/admin/backfill-azure-status failed")
+                return _wsgi_json(start_response, {"error": str(exc)}, 500)
         return _wsgi_json(start_response, {"error": "Not Found"}, 404)
 
     if method == "POST":
@@ -1926,6 +1981,17 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 self._send_json({"statuses": query_statuses()})
             except Exception as exc:
+                self._send_json({"error": str(exc)}, 500)
+            return
+        if parsed.path == "/api/admin/backfill-azure-status":
+            provided_token = self.headers.get("X-Webhook-Token", "")
+            if MAKE_WEBHOOK_TOKEN and provided_token != MAKE_WEBHOOK_TOKEN:
+                self._send_json({"error": "Unauthorized webhook token."}, 401)
+                return
+            try:
+                self._send_json({"source": "backfill-azure-status", **get_blob_backfill_status()})
+            except Exception as exc:
+                logging.exception("/api/admin/backfill-azure-status failed")
                 self._send_json({"error": str(exc)}, 500)
             return
 
