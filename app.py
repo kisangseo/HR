@@ -1201,6 +1201,14 @@ def build_document_links(cognito_pdf_url: Any, cognito_document_link: Any, backg
     return links
 
 
+def build_document_links_safe(*args: Any) -> list[dict[str, str]]:
+    try:
+        return build_document_links(*args)
+    except Exception:
+        logging.exception("build_document_links failed")
+        return []
+
+
 def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
     sql = """
         SELECT
@@ -1282,7 +1290,7 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
                 "source": row[8],
                 "cognitoPdfUrl": row[9],
                 "cognitoDocumentLink": row[10],
-                "documents": build_document_links(row[9], row[10], row[11], row[12], row[13], row[14], row[15], row[16], row[17], row[18], row[19], row[20], row[21]),
+                "documents": build_document_links_safe(row[9], row[10], row[11], row[12], row[13], row[14], row[15], row[16], row[17], row[18], row[19], row[20], row[21]),
                 "contacted": bool(row[22]) if row[22] is not None else False,
             }
         )
@@ -1724,6 +1732,7 @@ def app(environ, start_response):
                 data = query_applicants(filters)
                 return _wsgi_json(start_response, {"applicants": data})
             except Exception as exc:
+                logging.exception("/api/applicants failed")
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
         if path == "/api/job-titles":
             try:
@@ -1985,6 +1994,7 @@ class Handler(BaseHTTPRequestHandler):
                 data = query_applicants(filters)
                 self._send_json({"applicants": data})
             except Exception as exc:
+                logging.exception("/api/applicants failed")
                 self._send_json({"error": str(exc)}, 500)
             return
 
