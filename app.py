@@ -1220,6 +1220,10 @@ def build_document_links_safe(*args: Any) -> list[dict[str, str]]:
         return []
 
 
+def _is_cognito_link(url: Any) -> bool:
+    return "cognitoforms.com" in str(url or "").lower()
+
+
 def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
     sql = """
         SELECT
@@ -1288,6 +1292,21 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
         for value in raw_other_positions:
             other_clean.extend(split_positions_text(str(value)))
         other_clean = [value for value in other_clean if value and value.lower() != primary_clean.lower()]
+        if _is_cognito_link(row[10]):
+            logging.warning(
+                "applicants_initial_link_still_cognito id=%s name=%s cognito_document_link=%s cognito_pdf_url=%s",
+                row[0],
+                row[2],
+                row[10],
+                row[9],
+            )
+        if _is_cognito_link(row[13]):
+            logging.warning(
+                "applicants_resume_still_cognito id=%s name=%s resume_file_url=%s",
+                row[0],
+                row[2],
+                row[13],
+            )
         raw_output.append(
             {
                 "id": row[0],
@@ -1382,6 +1401,14 @@ def run_blob_backfill(limit: int = 200) -> dict[str, int]:
                 except Exception:
                     logging.exception("backfill persist failed app_id=%s doc_type=%s", app_id, doc_type)
                     continue
+                if doc_type == "initial_application":
+                    logging.info(
+                        "backfill_initial_application_result app_id=%s source=%s updated=%s changed=%s",
+                        app_id,
+                        original,
+                        updated,
+                        updated != original,
+                    )
                 if updated != original:
                     cursor.execute(f"UPDATE dbo.job_applications SET {col_name} = ? WHERE id = ?", (updated, app_id))
                     migrated += 1
