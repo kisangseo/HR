@@ -586,8 +586,10 @@ def upsert_cognito_record(cursor, mapped: dict[str, Any], payload: dict[str, Any
     cognito_form_id = payload.get("cognito_form_id")
     cognito_entry_number = payload.get("cognito_entry_number")
     cognito_entry_id = payload.get("cognito_entry_id")
-    cognito_pdf_url = clean_text(payload.get("cognito_pdf_url"))
-    cognito_document_link = clean_text(payload.get("cognito_document_link"))
+    cognito_pdf_candidates = extract_file_urls(payload.get("cognito_pdf_url"))
+    cognito_pdf_url = clean_text(cognito_pdf_candidates[0] if cognito_pdf_candidates else payload.get("cognito_pdf_url"))
+    cognito_document_candidates = extract_file_urls(payload.get("cognito_document_link"))
+    cognito_document_link = clean_text(cognito_document_candidates[0] if cognito_document_candidates else payload.get("cognito_document_link"))
 
     middle_name = clean_text(payload.get("middle_name"))
     address_line1 = clean_text(payload.get("address_line1"))
