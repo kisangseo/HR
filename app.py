@@ -112,9 +112,12 @@ def _build_blob_name(app_id: int, document_type: str, original_url: str) -> str:
 
 
 def copy_url_to_azure_blob(app_id: int, document_type: str, source_url: str) -> tuple[str | None, str | None, str | None]:
-    source = (source_url or "").strip()
+    source = (source_url or "").strip().strip('"').strip("'").strip("{}")
     if not source:
         return None, None, "empty_source"
+    parsed = urlparse(source)
+    if parsed.scheme not in {"http", "https"}:
+        return None, None, "invalid_source_url"
     if _is_azure_blob_url(source):
         return source, source, None
     client = _blob_service_client()
@@ -1372,13 +1375,23 @@ def run_blob_backfill(limit: int = 200) -> dict[str, int]:
                 original = clean_text(row[col_idx])
                 if not original:
                     continue
-                updated = persist_document_record(cursor, app_id, doc_type, original)
+                try:
+                    updated = persist_document_record(cursor, app_id, doc_type, original)
+                except Exception:
+                    logging.exception("backfill persist failed app_id=%s doc_type=%s", app_id, doc_type)
+                    continue
                 if updated != original:
                     cursor.execute(f"UPDATE dbo.job_applications SET {col_name} = ? WHERE id = ?", (updated, app_id))
                     migrated += 1
             for doc_type, idx, col_name in [("drivers_license", 5, "drivers_license_document_urls"), ("dd214", 6, "dd214_document_urls"), ("diploma", 7, "diploma_document_urls"), ("social_security_front", 8, "social_security_front_document_urls"), ("social_security_back", 9, "social_security_back_document_urls"), ("credit_report", 10, "credit_report_document_urls"), ("birth_certificate", 11, "birth_certificate_document_urls"), ("passport", 12, "passport_document_urls")]:
                 current = parse_json_array_text(row[idx])
-                replaced = [persist_document_record(cursor, app_id, doc_type, url) for url in current]
+                replaced: list[str] = []
+                for url in current:
+                    try:
+                        replaced.append(persist_document_record(cursor, app_id, doc_type, url))
+                    except Exception:
+                        logging.exception("backfill persist failed app_id=%s doc_type=%s", app_id, doc_type)
+                        replaced.append(url)
                 if replaced != current:
                     cursor.execute(f"UPDATE dbo.job_applications SET {col_name} = ? WHERE id = ?", (json.dumps(replaced), app_id))
                     migrated += 1
