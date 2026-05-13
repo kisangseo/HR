@@ -10,7 +10,7 @@ import re
 import msal
 import requests
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -20,6 +20,13 @@ try:
     import pyodbc
 except ImportError:  # pragma: no cover
     pyodbc = None
+try:
+    from azure.storage.blob import BlobSasPermissions, BlobServiceClient, ContentSettings, generate_blob_sas
+except ImportError:  # pragma: no cover
+    BlobSasPermissions = None
+    BlobServiceClient = None
+    ContentSettings = None
+    generate_blob_sas = None
 
 ROOT = Path(__file__).resolve().parent
 APP_VERSION = "2026-04-29.cognito-upsert-v1"
@@ -32,6 +39,12 @@ CLIENT_ID = os.getenv("CLIENT_ID", "").strip()
 CLIENT_SECRET = os.getenv("CLIENT_SECRET", "").strip()
 TENANT_ID = os.getenv("TENANT_ID", "").strip()
 MAILBOX_EMAIL = os.getenv("MAILBOX_EMAIL", "").strip()
+AZURE_STORAGE_ACCOUNT_NAME = os.getenv("AZURE_STORAGE_ACCOUNT_NAME", "").strip()
+AZURE_STORAGE_CONTAINER_NAME = os.getenv("AZURE_STORAGE_CONTAINER_NAME", "hrjobapp").strip() or "hrjobapp"
+AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING", "").strip()
+AZURE_STORAGE_ACCOUNT_KEY = os.getenv("AZURE_STORAGE_ACCOUNT_KEY", "").strip()
+AZURE_STORAGE_SAS_TTL_MINUTES = int(os.getenv("AZURE_STORAGE_SAS_TTL_MINUTES", "10"))
+AZURE_STORAGE_BLOB_PREFIX = os.getenv("AZURE_STORAGE_BLOB_PREFIX", "applications").strip() or "applications"
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 GRAPH_SCOPE = ["https://graph.microsoft.com/.default"]
 
@@ -68,6 +81,88 @@ POSITION_SPLIT_PATTERN = re.compile(
     r"(court security officer|deputy sheriff|radio dispatcher|information technology|communications|social worker|other)",
     flags=re.IGNORECASE,
 )
+
+
+def _blob_service_client() -> BlobServiceClient | None:
+    if BlobServiceClient is None:
+        return None
+    if AZURE_STORAGE_CONNECTION_STRING:
+        return BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING)
+    if AZURE_STORAGE_ACCOUNT_NAME and AZURE_STORAGE_ACCOUNT_KEY:
+        return BlobServiceClient(
+            account_url=f"https://{AZURE_STORAGE_ACCOUNT_NAME}.blob.core.windows.net",
+            credential=AZURE_STORAGE_ACCOUNT_KEY,
+        )
+    return None
+
+
+def _is_azure_blob_url(url: str) -> bool:
+    return ".blob.core.windows.net/" in (url or "").lower()
+
+
+def _build_blob_name(app_id: int, document_type: str, original_url: str) -> str:
+    ext = ".pdf"
+    parsed = urlparse(original_url or "")
+    tail = (Path(parsed.path).name or "").strip()
+    if "." in tail:
+        ext = "." + tail.rsplit(".", 1)[-1].lower()
+    safe_doc = re.sub(r"[^a-z0-9_-]+", "-", document_type.lower()).strip("-") or "document"
+    return f"{AZURE_STORAGE_BLOB_PREFIX}/{app_id}/{safe_doc}_{int(datetime.now(timezone.utc).timestamp())}{ext}"
+
+
+def copy_url_to_azure_blob(app_id: int, document_type: str, source_url: str) -> tuple[str | None, str | None, str | None]:
+    source = (source_url or "").strip().strip('"').strip("'").strip("{}")
+    if not source:
+        return None, None, "empty_source"
+    parsed = urlparse(source)
+    if parsed.scheme not in {"http", "https"}:
+        return None, None, "invalid_source_url"
+    if _is_azure_blob_url(source):
+        return source, source, None
+    client = _blob_service_client()
+    if client is None:
+        if BlobServiceClient is None:
+            return None, None, "azure_sdk_not_installed"
+        return None, None, "azure_storage_not_configured"
+    resp = requests.get(source, timeout=45)
+    if resp.status_code >= 400:
+        if resp.status_code in {401, 403, 404}:
+            return None, None, f"source_expired_or_denied_{resp.status_code}"
+        return None, None, f"source_download_failed_{resp.status_code}"
+    blob_name = _build_blob_name(app_id, document_type, source)
+    blob_client = client.get_blob_client(container=AZURE_STORAGE_CONTAINER_NAME, blob=blob_name)
+    ctype = (resp.headers.get("Content-Type") or "application/octet-stream").split(";")[0].strip()
+    upload_kwargs: dict[str, Any] = {"overwrite": True}
+    if ContentSettings is not None:
+        upload_kwargs["content_settings"] = ContentSettings(content_type=ctype)
+    blob_client.upload_blob(resp.content, **upload_kwargs)
+    return blob_name, blob_client.url, None
+
+
+def build_read_sas_url(blob_url: str) -> str:
+    text = (blob_url or "").strip()
+    if not text or not _is_azure_blob_url(text):
+        return text
+    if not AZURE_STORAGE_ACCOUNT_NAME or not AZURE_STORAGE_ACCOUNT_KEY or generate_blob_sas is None or BlobSasPermissions is None:
+        return text
+    parsed = urlparse(text)
+    path_parts = parsed.path.lstrip("/").split("/", 1)
+    if len(path_parts) != 2:
+        return text
+    container, blob_name = path_parts
+    try:
+        token = generate_blob_sas(
+            account_name=AZURE_STORAGE_ACCOUNT_NAME,
+            container_name=container,
+            blob_name=blob_name,
+            account_key=AZURE_STORAGE_ACCOUNT_KEY,
+            permission=BlobSasPermissions(read=True),
+            expiry=datetime.now(timezone.utc) + timedelta(minutes=AZURE_STORAGE_SAS_TTL_MINUTES),
+        )
+        return f"{parsed.scheme}://{parsed.netloc}/{container}/{blob_name}?{token}"
+    except Exception:
+        logging.exception("build_read_sas_url failed for blob_url=%s", text)
+        return text
 
 def get_sql_connection():
     if pyodbc is None:
@@ -490,7 +585,10 @@ def upsert_cognito_record(cursor, mapped: dict[str, Any], payload: dict[str, Any
     cognito_form_id = payload.get("cognito_form_id")
     cognito_entry_number = payload.get("cognito_entry_number")
     cognito_entry_id = payload.get("cognito_entry_id")
-    cognito_pdf_url = payload.get("cognito_pdf_url")
+    cognito_pdf_candidates = extract_file_urls(payload.get("cognito_pdf_url"))
+    cognito_pdf_url = clean_text(cognito_pdf_candidates[0] if cognito_pdf_candidates else payload.get("cognito_pdf_url"))
+    cognito_document_candidates = extract_file_urls(payload.get("cognito_document_link"))
+    cognito_document_link = clean_text(cognito_document_candidates[0] if cognito_document_candidates else payload.get("cognito_document_link"))
 
     middle_name = clean_text(payload.get("middle_name"))
     address_line1 = clean_text(payload.get("address_line1"))
@@ -530,6 +628,10 @@ def upsert_cognito_record(cursor, mapped: dict[str, Any], payload: dict[str, Any
 
     if candidates:
         app_id = int(candidates[0])
+        if cognito_pdf_url:
+            cognito_pdf_url = persist_document_record(cursor, app_id, "initial_application", cognito_pdf_url)
+        if cognito_document_link:
+            cognito_document_link = persist_document_record(cursor, app_id, "initial_application", cognito_document_link)
         cursor.execute(
             """
             UPDATE dbo.job_applications
@@ -591,7 +693,7 @@ def upsert_cognito_record(cursor, mapped: dict[str, Any], payload: dict[str, Any
             (
                 mapped["submitted_at"], first_name, last_name, middle_name, email, phone, mapped["primary_position"], json.dumps(mapped["other_positions"]), status, json.dumps(payload),
                 first_norm, last_norm, email_norm, phone_norm, cognito_form_id, cognito_entry_number, cognito_entry_id,
-                clean_text(payload.get("cognito_internal_link")), clean_text(payload.get("cognito_public_link")), clean_text(payload.get("cognito_admin_link")), clean_text(payload.get("cognito_document_link")),
+                clean_text(payload.get("cognito_internal_link")), clean_text(payload.get("cognito_public_link")), clean_text(payload.get("cognito_admin_link")), cognito_document_link,
                 payload.get("cognito_date_created"), payload.get("cognito_date_submitted"), payload.get("cognito_date_updated"),
                 address_line1, address_line2, city, state, postal_code, country, country_code, full_address,
                 consent_background_investigation, has_valid_drivers_license, drivers_license_number, drivers_license_state, felony_conviction,
@@ -637,6 +739,12 @@ def upsert_cognito_record(cursor, mapped: dict[str, Any], payload: dict[str, Any
             ),
         )
         app_id = int(inserted_row.fetchone()[0])
+        if cognito_pdf_url:
+            cognito_pdf_url = persist_document_record(cursor, app_id, "initial_application", cognito_pdf_url)
+            cursor.execute("UPDATE dbo.job_applications SET cognito_pdf_url = ?, cognito_document_link = COALESCE(?, cognito_document_link) WHERE id = ?", (cognito_pdf_url, cognito_pdf_url, app_id))
+        if cognito_document_link:
+            cognito_document_link = persist_document_record(cursor, app_id, "initial_application", cognito_document_link)
+            cursor.execute("UPDATE dbo.job_applications SET cognito_document_link = ? WHERE id = ?", (cognito_document_link, app_id))
 
     cursor.execute(
         """
@@ -668,6 +776,15 @@ def upsert_background_record(cursor, mapped: dict[str, Any], payload: dict[str, 
         app_id = upsert_cognito_record(cursor, mapped, payload)
     else:
         app_id = int(row[0])
+        background_pdf_url = clean_text(payload.get("background_pdf_url"))
+        if background_pdf_url:
+            background_pdf_url = persist_document_record(cursor, app_id, "background_check_form", background_pdf_url)
+        background_document_url = clean_text(payload.get("background_document_url"))
+        if background_document_url:
+            background_document_url = persist_document_record(cursor, app_id, "background_check_document", background_document_url)
+        drivers_license_urls = [persist_document_record(cursor, app_id, "drivers_license", url) for url in extract_file_urls(payload.get("drivers_license_files") or payload.get("drivers_license_urls") or payload.get("drivers_license_document_urls") or payload.get("drivers_license_document_url"))]
+        dd214_urls = [persist_document_record(cursor, app_id, "dd214", url) for url in extract_file_urls(payload.get("dd214_files") or payload.get("dd214_urls") or payload.get("dd214_document_urls") or payload.get("dd214_document_url"))]
+        diploma_urls = [persist_document_record(cursor, app_id, "diploma", url) for url in extract_file_urls(payload.get("diploma_files") or payload.get("diploma_urls") or payload.get("diploma_document_urls") or payload.get("diploma_document_url"))]
         cursor.execute(
             """
             UPDATE dbo.job_applications
@@ -684,11 +801,11 @@ def upsert_background_record(cursor, mapped: dict[str, Any], payload: dict[str, 
             """,
             (
                 json.dumps(payload),
-                clean_text(payload.get("background_pdf_url")),
-                clean_text(payload.get("background_document_url")),
-                json.dumps(extract_file_urls(payload.get("drivers_license_files") or payload.get("drivers_license_urls") or payload.get("drivers_license_document_urls") or payload.get("drivers_license_document_url"))),
-                json.dumps(extract_file_urls(payload.get("dd214_files") or payload.get("dd214_urls") or payload.get("dd214_document_urls") or payload.get("dd214_document_url"))),
-                json.dumps(extract_file_urls(payload.get("diploma_files") or payload.get("diploma_urls") or payload.get("diploma_document_urls") or payload.get("diploma_document_url"))),
+                background_pdf_url,
+                background_document_url,
+                json.dumps(drivers_license_urls),
+                json.dumps(dd214_urls),
+                json.dumps(diploma_urls),
                 payload.get("cognito_date_submitted"),
                 app_id,
             ),
@@ -739,19 +856,20 @@ def upsert_job_app_docs(cursor, payload: dict[str, Any]) -> dict[str, Any]:
             raise LookupError("No matching applicant found for provided email + full name.")
         raise LookupError("No matching applicant found for provided email.")
 
-    def merged(existing_value: Any, incoming_value: Any) -> list[str]:
+    def merged(existing_value: Any, incoming_value: Any, document_type: str) -> list[str]:
         existing = extract_file_urls(existing_value)
         for url in extract_file_urls(incoming_value):
+            url = persist_document_record(cursor, app_id, document_type, url)
             if url not in existing:
                 existing.append(url)
         return existing
 
     app_id = int(row[0])
-    ss_front = merged(row[1], payload.get("social_security_front"))
-    ss_back = merged(row[2], payload.get("social_security_back"))
-    credit_report = merged(row[3], payload.get("credit_report_pdf"))
-    birth_certificate = merged(row[4], payload.get("birth_certificate"))
-    passport = merged(row[5], payload.get("passport"))
+    ss_front = merged(row[1], payload.get("social_security_front"), "social_security_front")
+    ss_back = merged(row[2], payload.get("social_security_back"), "social_security_back")
+    credit_report = merged(row[3], payload.get("credit_report_pdf"), "credit_report")
+    birth_certificate = merged(row[4], payload.get("birth_certificate"), "birth_certificate")
+    passport = merged(row[5], payload.get("passport"), "passport")
     cursor.execute(
         """
         UPDATE dbo.job_applications
@@ -829,6 +947,31 @@ def extract_file_urls(value: Any) -> list[str]:
             if candidate:
                 urls.append(candidate)
     return urls
+
+
+def persist_document_record(cursor, app_id: int, document_type: str, source_url: str) -> str:
+    blob_name, blob_url, error = copy_url_to_azure_blob(app_id, document_type, source_url)
+    status = "uploaded" if blob_url else ("manual_required" if error and "expired_or_denied" in error else "failed")
+    needs_manual = 1 if status == "manual_required" else 0
+    cursor.execute(
+        """
+        INSERT INTO dbo.job_application_documents (
+            job_application_id, document_type, source_url, azure_blob_name, azure_blob_url,
+            status, error_message, needs_manual, uploaded_at, last_attempt_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'uploaded' THEN SYSUTCDATETIME() ELSE NULL END, SYSUTCDATETIME(), SYSUTCDATETIME())
+        """,
+        (app_id, document_type, source_url, blob_name, blob_url, status, error, needs_manual, status),
+    )
+    logging.info(
+        "document_persist app_id=%s document_type=%s status=%s needs_manual=%s blob_name=%s error=%s",
+        app_id,
+        document_type,
+        status,
+        needs_manual,
+        blob_name,
+        error,
+    )
+    return blob_url or source_url
 
 
 def build_record_from_make(payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -1043,7 +1186,7 @@ def build_document_links(cognito_pdf_url: Any, cognito_document_link: Any, backg
             return
         if any(item["url"] == text for item in links):
             return
-        links.append({"label": label, "url": text})
+        links.append({"label": label, "url": build_read_sas_url(text)})
 
     add("Initial Application", cognito_document_link)
     add("Background Check Form", background_pdf_url)
@@ -1066,6 +1209,14 @@ def build_document_links(cognito_pdf_url: Any, cognito_document_link: Any, backg
         add("Passport", url)
 
     return links
+
+
+def build_document_links_safe(*args: Any) -> list[dict[str, str]]:
+    try:
+        return build_document_links(*args)
+    except Exception:
+        logging.exception("build_document_links failed")
+        return []
 
 
 def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
@@ -1149,7 +1300,7 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
                 "source": row[8],
                 "cognitoPdfUrl": row[9],
                 "cognitoDocumentLink": row[10],
-                "documents": build_document_links(row[9], row[10], row[11], row[12], row[13], row[14], row[15], row[16], row[17], row[18], row[19], row[20], row[21]),
+                "documents": build_document_links_safe(row[9], row[10], row[11], row[12], row[13], row[14], row[15], row[16], row[17], row[18], row[19], row[20], row[21]),
                 "contacted": bool(row[22]) if row[22] is not None else False,
             }
         )
@@ -1202,6 +1353,90 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
 
     output.sort(key=lambda item: item["submittedAt"], reverse=True)
     return output
+
+
+def run_blob_backfill(limit: int = 200) -> dict[str, int]:
+    with get_sql_connection() as conn:
+        cursor = conn.cursor()
+        rows = cursor.execute(
+            """
+            SELECT TOP (?) id, cognito_pdf_url, cognito_document_link, background_pdf_url, resume_file_url,
+                   drivers_license_document_urls, dd214_document_urls, diploma_document_urls,
+                   social_security_front_document_urls, social_security_back_document_urls,
+                   credit_report_document_urls, birth_certificate_document_urls, passport_document_urls
+            FROM dbo.job_applications
+            ORDER BY id DESC
+            """,
+            (limit,),
+        ).fetchall()
+        migrated = 0
+        for row in rows:
+            app_id = int(row[0])
+            for doc_type, col_idx, col_name in [("initial_application", 1, "cognito_pdf_url"), ("initial_application", 2, "cognito_document_link"), ("background_check_form", 3, "background_pdf_url"), ("resume", 4, "resume_file_url")]:
+                original = clean_text(row[col_idx])
+                if not original:
+                    continue
+                try:
+                    updated = persist_document_record(cursor, app_id, doc_type, original)
+                except Exception:
+                    logging.exception("backfill persist failed app_id=%s doc_type=%s", app_id, doc_type)
+                    continue
+                if updated != original:
+                    cursor.execute(f"UPDATE dbo.job_applications SET {col_name} = ? WHERE id = ?", (updated, app_id))
+                    migrated += 1
+            for doc_type, idx, col_name in [("drivers_license", 5, "drivers_license_document_urls"), ("dd214", 6, "dd214_document_urls"), ("diploma", 7, "diploma_document_urls"), ("social_security_front", 8, "social_security_front_document_urls"), ("social_security_back", 9, "social_security_back_document_urls"), ("credit_report", 10, "credit_report_document_urls"), ("birth_certificate", 11, "birth_certificate_document_urls"), ("passport", 12, "passport_document_urls")]:
+                current = parse_json_array_text(row[idx])
+                replaced: list[str] = []
+                for url in current:
+                    try:
+                        replaced.append(persist_document_record(cursor, app_id, doc_type, url))
+                    except Exception:
+                        logging.exception("backfill persist failed app_id=%s doc_type=%s", app_id, doc_type)
+                        replaced.append(url)
+                if replaced != current:
+                    cursor.execute(f"UPDATE dbo.job_applications SET {col_name} = ? WHERE id = ?", (json.dumps(replaced), app_id))
+                    migrated += 1
+        conn.commit()
+        manual_count_row = cursor.execute("SELECT COUNT(*) FROM dbo.job_application_documents WHERE needs_manual = 1").fetchone()
+        manual_count = int(manual_count_row[0]) if manual_count_row else 0
+    return {"processed": len(rows), "migrated": migrated, "manual_required": manual_count}
+
+
+def get_blob_backfill_status() -> dict[str, Any]:
+    with get_sql_connection() as conn:
+        cursor = conn.cursor()
+        rows = cursor.execute(
+            """
+            SELECT status, COUNT(*)
+            FROM dbo.job_application_documents
+            GROUP BY status
+            """
+        ).fetchall()
+        by_status = {str(row[0] or "unknown"): int(row[1]) for row in rows}
+        manual_row = cursor.execute("SELECT COUNT(*) FROM dbo.job_application_documents WHERE needs_manual = 1").fetchone()
+        recent_manual = cursor.execute(
+            """
+            SELECT TOP 20 id, job_application_id, document_type, source_url, error_message, last_attempt_at
+            FROM dbo.job_application_documents
+            WHERE needs_manual = 1
+            ORDER BY COALESCE(last_attempt_at, created_at) DESC
+            """
+        ).fetchall()
+    return {
+        "status_counts": by_status,
+        "manual_required_count": int(manual_row[0]) if manual_row else 0,
+        "manual_required_recent": [
+            {
+                "id": int(row[0]),
+                "job_application_id": int(row[1]),
+                "document_type": str(row[2] or ""),
+                "source_url": str(row[3] or ""),
+                "error_message": str(row[4] or ""),
+                "last_attempt_at": str(row[5] or ""),
+            }
+            for row in recent_manual
+        ],
+    }
 
 
 def query_job_titles() -> list[str]:
@@ -1517,6 +1752,7 @@ def app(environ, start_response):
                 data = query_applicants(filters)
                 return _wsgi_json(start_response, {"applicants": data})
             except Exception as exc:
+                logging.exception("/api/applicants failed")
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
         if path == "/api/job-titles":
             try:
@@ -1529,6 +1765,15 @@ def app(environ, start_response):
                 statuses = query_statuses()
                 return _wsgi_json(start_response, {"statuses": statuses})
             except Exception as exc:
+                return _wsgi_json(start_response, {"error": str(exc)}, 500)
+        if path == "/api/admin/backfill-azure-status":
+            provided_token = environ.get("HTTP_X_WEBHOOK_TOKEN", "")
+            if MAKE_WEBHOOK_TOKEN and provided_token != MAKE_WEBHOOK_TOKEN:
+                return _wsgi_json(start_response, {"error": "Unauthorized webhook token."}, 401)
+            try:
+                return _wsgi_json(start_response, {"source": "backfill-azure-status", **get_blob_backfill_status()})
+            except Exception as exc:
+                logging.exception("/api/admin/backfill-azure-status failed")
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
         return _wsgi_json(start_response, {"error": "Not Found"}, 404)
 
@@ -1691,6 +1936,19 @@ def app(environ, start_response):
                 logging.exception("/api/job-app-docs failed")
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
 
+        if path == "/api/admin/backfill-azure-blobs":
+            provided_token = environ.get("HTTP_X_WEBHOOK_TOKEN", "")
+            if MAKE_WEBHOOK_TOKEN and provided_token != MAKE_WEBHOOK_TOKEN:
+                return _wsgi_json(start_response, {"error": "Unauthorized webhook token."}, 401)
+            try:
+                payload = parse_json_body(body_text or "{}")
+                limit = int(payload.get("limit") or 200)
+                result = run_blob_backfill(limit=limit)
+                return _wsgi_json(start_response, {"source": "backfill-azure-blobs", **result})
+            except Exception as exc:
+                logging.exception("/api/admin/backfill-azure-blobs failed")
+                return _wsgi_json(start_response, {"error": str(exc)}, 500)
+
         if path == "/api/ingest-csv":
             # CSV ingest is intentionally disabled for now to avoid manual user uploads.
             # Legacy handler kept commented for quick restore:
@@ -1756,6 +2014,7 @@ class Handler(BaseHTTPRequestHandler):
                 data = query_applicants(filters)
                 self._send_json({"applicants": data})
             except Exception as exc:
+                logging.exception("/api/applicants failed")
                 self._send_json({"error": str(exc)}, 500)
             return
 
@@ -1770,6 +2029,17 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 self._send_json({"statuses": query_statuses()})
             except Exception as exc:
+                self._send_json({"error": str(exc)}, 500)
+            return
+        if parsed.path == "/api/admin/backfill-azure-status":
+            provided_token = self.headers.get("X-Webhook-Token", "")
+            if MAKE_WEBHOOK_TOKEN and provided_token != MAKE_WEBHOOK_TOKEN:
+                self._send_json({"error": "Unauthorized webhook token."}, 401)
+                return
+            try:
+                self._send_json({"source": "backfill-azure-status", **get_blob_backfill_status()})
+            except Exception as exc:
+                logging.exception("/api/admin/backfill-azure-status failed")
                 self._send_json({"error": str(exc)}, 500)
             return
 

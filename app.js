@@ -1,6 +1,7 @@
 const state = {
   applicants: [],
-  selectedIds: new Set()
+  selectedIds: new Set(),
+  latestApplicantsRequestId: 0
 };
 
 const els = {
@@ -87,6 +88,7 @@ function renderDateRangeFilter(awaitingSecond = false) {
 }
 
 async function loadApplicants() {
+  const requestId = ++state.latestApplicantsRequestId;
   const dateFrom = dateRangeState.from;
   const dateTo = dateRangeState.to || dateRangeState.from;
   const params = new URLSearchParams({
@@ -99,6 +101,7 @@ async function loadApplicants() {
 
   const response = await fetch(`/api/applicants?${params.toString()}`);
   const payload = await readJsonResponse(response, 'Failed to load applicants');
+  if (requestId !== state.latestApplicantsRequestId) return;
   state.applicants = payload.applicants || [];
   renderTable(state.applicants);
 }
