@@ -584,6 +584,7 @@ def upsert_cognito_record(cursor, mapped: dict[str, Any], payload: dict[str, Any
     cognito_entry_number = payload.get("cognito_entry_number")
     cognito_entry_id = payload.get("cognito_entry_id")
     cognito_pdf_url = clean_text(payload.get("cognito_pdf_url"))
+    cognito_document_link = clean_text(payload.get("cognito_document_link"))
 
     middle_name = clean_text(payload.get("middle_name"))
     address_line1 = clean_text(payload.get("address_line1"))
@@ -625,6 +626,8 @@ def upsert_cognito_record(cursor, mapped: dict[str, Any], payload: dict[str, Any
         app_id = int(candidates[0])
         if cognito_pdf_url:
             cognito_pdf_url = persist_document_record(cursor, app_id, "initial_application", cognito_pdf_url)
+        if cognito_document_link:
+            cognito_document_link = persist_document_record(cursor, app_id, "initial_application", cognito_document_link)
         cursor.execute(
             """
             UPDATE dbo.job_applications
@@ -686,7 +689,7 @@ def upsert_cognito_record(cursor, mapped: dict[str, Any], payload: dict[str, Any
             (
                 mapped["submitted_at"], first_name, last_name, middle_name, email, phone, mapped["primary_position"], json.dumps(mapped["other_positions"]), status, json.dumps(payload),
                 first_norm, last_norm, email_norm, phone_norm, cognito_form_id, cognito_entry_number, cognito_entry_id,
-                clean_text(payload.get("cognito_internal_link")), clean_text(payload.get("cognito_public_link")), clean_text(payload.get("cognito_admin_link")), clean_text(payload.get("cognito_document_link")),
+                clean_text(payload.get("cognito_internal_link")), clean_text(payload.get("cognito_public_link")), clean_text(payload.get("cognito_admin_link")), cognito_document_link,
                 payload.get("cognito_date_created"), payload.get("cognito_date_submitted"), payload.get("cognito_date_updated"),
                 address_line1, address_line2, city, state, postal_code, country, country_code, full_address,
                 consent_background_investigation, has_valid_drivers_license, drivers_license_number, drivers_license_state, felony_conviction,
@@ -735,6 +738,9 @@ def upsert_cognito_record(cursor, mapped: dict[str, Any], payload: dict[str, Any
         if cognito_pdf_url:
             cognito_pdf_url = persist_document_record(cursor, app_id, "initial_application", cognito_pdf_url)
             cursor.execute("UPDATE dbo.job_applications SET cognito_pdf_url = ?, cognito_document_link = COALESCE(?, cognito_document_link) WHERE id = ?", (cognito_pdf_url, cognito_pdf_url, app_id))
+        if cognito_document_link:
+            cognito_document_link = persist_document_record(cursor, app_id, "initial_application", cognito_document_link)
+            cursor.execute("UPDATE dbo.job_applications SET cognito_document_link = ? WHERE id = ?", (cognito_document_link, app_id))
 
     cursor.execute(
         """
