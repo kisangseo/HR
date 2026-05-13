@@ -148,15 +148,19 @@ def build_read_sas_url(blob_url: str) -> str:
     if len(path_parts) != 2:
         return text
     container, blob_name = path_parts
-    token = generate_blob_sas(
-        account_name=AZURE_STORAGE_ACCOUNT_NAME,
-        container_name=container,
-        blob_name=blob_name,
-        account_key=AZURE_STORAGE_ACCOUNT_KEY,
-        permission=BlobSasPermissions(read=True),
-        expiry=datetime.now(timezone.utc) + timedelta(minutes=AZURE_STORAGE_SAS_TTL_MINUTES),
-    )
-    return f"{parsed.scheme}://{parsed.netloc}/{container}/{blob_name}?{token}"
+    try:
+        token = generate_blob_sas(
+            account_name=AZURE_STORAGE_ACCOUNT_NAME,
+            container_name=container,
+            blob_name=blob_name,
+            account_key=AZURE_STORAGE_ACCOUNT_KEY,
+            permission=BlobSasPermissions(read=True),
+            expiry=datetime.now(timezone.utc) + timedelta(minutes=AZURE_STORAGE_SAS_TTL_MINUTES),
+        )
+        return f"{parsed.scheme}://{parsed.netloc}/{container}/{blob_name}?{token}"
+    except Exception:
+        logging.exception("build_read_sas_url failed for blob_url=%s", text)
+        return text
 
 def get_sql_connection():
     if pyodbc is None:
