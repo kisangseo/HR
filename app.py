@@ -1356,7 +1356,7 @@ def run_blob_backfill(limit: int = 200) -> dict[str, int]:
         cursor = conn.cursor()
         rows = cursor.execute(
             """
-            SELECT TOP (?) id, cognito_pdf_url, background_pdf_url, resume_file_url,
+            SELECT TOP (?) id, cognito_pdf_url, cognito_document_link, background_pdf_url, resume_file_url,
                    drivers_license_document_urls, dd214_document_urls, diploma_document_urls,
                    social_security_front_document_urls, social_security_back_document_urls,
                    credit_report_document_urls, birth_certificate_document_urls, passport_document_urls
@@ -1368,7 +1368,7 @@ def run_blob_backfill(limit: int = 200) -> dict[str, int]:
         migrated = 0
         for row in rows:
             app_id = int(row[0])
-            for doc_type, col_idx, col_name in [("initial_application", 1, "cognito_pdf_url"), ("background_check_form", 2, "background_pdf_url"), ("resume", 3, "resume_file_url")]:
+            for doc_type, col_idx, col_name in [("initial_application", 1, "cognito_pdf_url"), ("initial_application", 2, "cognito_document_link"), ("background_check_form", 3, "background_pdf_url"), ("resume", 4, "resume_file_url")]:
                 original = clean_text(row[col_idx])
                 if not original:
                     continue
@@ -1376,7 +1376,7 @@ def run_blob_backfill(limit: int = 200) -> dict[str, int]:
                 if updated != original:
                     cursor.execute(f"UPDATE dbo.job_applications SET {col_name} = ? WHERE id = ?", (updated, app_id))
                     migrated += 1
-            for doc_type, idx, col_name in [("drivers_license", 4, "drivers_license_document_urls"), ("dd214", 5, "dd214_document_urls"), ("diploma", 6, "diploma_document_urls"), ("social_security_front", 7, "social_security_front_document_urls"), ("social_security_back", 8, "social_security_back_document_urls"), ("credit_report", 9, "credit_report_document_urls"), ("birth_certificate", 10, "birth_certificate_document_urls"), ("passport", 11, "passport_document_urls")]:
+            for doc_type, idx, col_name in [("drivers_license", 5, "drivers_license_document_urls"), ("dd214", 6, "dd214_document_urls"), ("diploma", 7, "diploma_document_urls"), ("social_security_front", 8, "social_security_front_document_urls"), ("social_security_back", 9, "social_security_back_document_urls"), ("credit_report", 10, "credit_report_document_urls"), ("birth_certificate", 11, "birth_certificate_document_urls"), ("passport", 12, "passport_document_urls")]:
                 current = parse_json_array_text(row[idx])
                 replaced = [persist_document_record(cursor, app_id, doc_type, url) for url in current]
                 if replaced != current:
