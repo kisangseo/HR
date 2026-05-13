@@ -21,6 +21,13 @@ try:
     import pyodbc
 except ImportError:  # pragma: no cover
     pyodbc = None
+try:
+    from azure.storage.blob import BlobSasPermissions, BlobServiceClient, ContentSettings, generate_blob_sas
+except ImportError:  # pragma: no cover
+    BlobSasPermissions = None
+    BlobServiceClient = None
+    ContentSettings = None
+    generate_blob_sas = None
 
 ROOT = Path(__file__).resolve().parent
 APP_VERSION = "2026-04-29.cognito-upsert-v1"
@@ -78,6 +85,8 @@ POSITION_SPLIT_PATTERN = re.compile(
 
 
 def _blob_service_client() -> BlobServiceClient | None:
+    if BlobServiceClient is None:
+        return None
     if AZURE_STORAGE_CONNECTION_STRING:
         return BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING)
     if AZURE_STORAGE_ACCOUNT_NAME and AZURE_STORAGE_ACCOUNT_KEY:
@@ -110,6 +119,8 @@ def copy_url_to_azure_blob(app_id: int, document_type: str, source_url: str) -> 
         return source, source, None
     client = _blob_service_client()
     if client is None:
+        if BlobServiceClient is None:
+            return None, None, "azure_sdk_not_installed"
         return None, None, "azure_storage_not_configured"
     resp = requests.get(source, timeout=45)
     if resp.status_code >= 400:
@@ -119,7 +130,10 @@ def copy_url_to_azure_blob(app_id: int, document_type: str, source_url: str) -> 
     blob_name = _build_blob_name(app_id, document_type, source)
     blob_client = client.get_blob_client(container=AZURE_STORAGE_CONTAINER_NAME, blob=blob_name)
     ctype = (resp.headers.get("Content-Type") or "application/octet-stream").split(";")[0].strip()
-    blob_client.upload_blob(resp.content, overwrite=True, content_settings=ContentSettings(content_type=ctype))
+    upload_kwargs: dict[str, Any] = {"overwrite": True}
+    if ContentSettings is not None:
+        upload_kwargs["content_settings"] = ContentSettings(content_type=ctype)
+    blob_client.upload_blob(resp.content, **upload_kwargs)
     return blob_name, blob_client.url, None
 
 
@@ -127,7 +141,7 @@ def build_read_sas_url(blob_url: str) -> str:
     text = (blob_url or "").strip()
     if not text or not _is_azure_blob_url(text):
         return text
-    if not AZURE_STORAGE_ACCOUNT_NAME or not AZURE_STORAGE_ACCOUNT_KEY:
+    if not AZURE_STORAGE_ACCOUNT_NAME or not AZURE_STORAGE_ACCOUNT_KEY or generate_blob_sas is None or BlobSasPermissions is None:
         return text
     parsed = urlparse(text)
     path_parts = parsed.path.lstrip("/").split("/", 1)
