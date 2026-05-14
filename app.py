@@ -813,9 +813,16 @@ def upsert_background_record(cursor, mapped: dict[str, Any], payload: dict[str, 
     background_document_url = clean_text(payload.get("background_document_url"))
     if background_document_url:
         background_document_url = persist_document_record(cursor, app_id, "background_check_document", background_document_url)
-    drivers_license_urls = [persist_document_record(cursor, app_id, "drivers_license", url) for url in extract_file_urls(payload.get("drivers_license_files") or payload.get("drivers_license_urls") or payload.get("drivers_license_document_urls") or payload.get("drivers_license_document_url"))]
-    dd214_urls = [persist_document_record(cursor, app_id, "dd214", url) for url in extract_file_urls(payload.get("dd214_files") or payload.get("dd214_urls") or payload.get("dd214_document_urls") or payload.get("dd214_document_url"))]
-    diploma_urls = [persist_document_record(cursor, app_id, "diploma", url) for url in extract_file_urls(payload.get("diploma_files") or payload.get("diploma_urls") or payload.get("diploma_document_urls") or payload.get("diploma_document_url"))]
+    def persist_latest(document_type: str, value: Any) -> list[str]:
+        urls = extract_file_urls(value)
+        latest_url = ""
+        for url in urls:
+            latest_url = persist_document_record(cursor, app_id, document_type, url)
+        return [latest_url] if latest_url else []
+
+    drivers_license_urls = persist_latest("drivers_license", payload.get("drivers_license_files") or payload.get("drivers_license_urls") or payload.get("drivers_license_document_urls") or payload.get("drivers_license_document_url"))
+    dd214_urls = persist_latest("dd214", payload.get("dd214_files") or payload.get("dd214_urls") or payload.get("dd214_document_urls") or payload.get("dd214_document_url"))
+    diploma_urls = persist_latest("diploma", payload.get("diploma_files") or payload.get("diploma_urls") or payload.get("diploma_document_urls") or payload.get("diploma_document_url"))
     cursor.execute(
         """
         UPDATE dbo.job_applications
@@ -887,20 +894,23 @@ def upsert_job_app_docs(cursor, payload: dict[str, Any]) -> dict[str, Any]:
             raise LookupError("No matching applicant found for provided email + full name.")
         raise LookupError("No matching applicant found for provided email.")
 
-    def merged(existing_value: Any, incoming_value: Any, document_type: str) -> list[str]:
+    def resolve_latest(existing_value: Any, incoming_values: list[Any], document_type: str) -> list[str]:
         existing = extract_file_urls(existing_value)
-        for url in extract_file_urls(incoming_value):
-            url = persist_document_record(cursor, app_id, document_type, url)
-            if url not in existing:
-                existing.append(url)
-        return existing
+        latest_url = existing[-1] if existing else ""
+        for incoming_value in incoming_values:
+            for url in extract_file_urls(incoming_value):
+                latest_url = persist_document_record(cursor, app_id, document_type, url)
+        return [latest_url] if latest_url else []
+
+    def pick_doc_values(*keys: str) -> list[Any]:
+        return [payload.get(key) for key in keys if key in payload]
 
     app_id = int(row[0])
-    ss_front = merged(row[1], payload.get("social_security_front"), "social_security_front")
-    ss_back = merged(row[2], payload.get("social_security_back"), "social_security_back")
-    credit_report = merged(row[3], payload.get("credit_report_pdf"), "credit_report")
-    birth_certificate = merged(row[4], payload.get("birth_certificate"), "birth_certificate")
-    passport = merged(row[5], payload.get("passport"), "passport")
+    ss_front = resolve_latest(row[1], pick_doc_values("social_security_front", "social_security_front_file", "ss_front"), "social_security_front")
+    ss_back = resolve_latest(row[2], pick_doc_values("social_security_back", "social_security_back_file", "ss_back"), "social_security_back")
+    credit_report = resolve_latest(row[3], pick_doc_values("credit_report_pdf", "credit_report", "credit_report_file"), "credit_report")
+    birth_certificate = resolve_latest(row[4], pick_doc_values("birth_certificate", "birth_certificate_file"), "birth_certificate")
+    passport = resolve_latest(row[5], pick_doc_values("passport", "passport_file"), "passport")
     cursor.execute(
         """
         UPDATE dbo.job_applications
