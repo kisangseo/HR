@@ -9,6 +9,7 @@ import re
 
 import msal
 import requests
+from azure.storage.blob import BlobSasPermissions, BlobServiceClient, ContentSettings, generate_blob_sas
 from collections import Counter
 from datetime import datetime, timezone, timedelta
 from io import BytesIO
