@@ -101,6 +101,14 @@ def _is_azure_blob_url(url: str) -> bool:
     return ".blob.core.windows.net/" in (url or "").lower()
 
 
+def _parse_blob_url(blob_url: str) -> tuple[str, str] | None:
+    parsed = urlparse(blob_url or "")
+    parts = parsed.path.lstrip("/").split("/", 1)
+    if len(parts) != 2:
+        return None
+    return parts[0], parts[1]
+
+
 def _sanitize_filename_part(value: str) -> str:
     text = re.sub(r"[^a-zA-Z0-9]+", "-", (value or "").strip()).strip("-").lower()
     return text[:80] if text else "unknown-applicant"
@@ -124,13 +132,31 @@ def copy_url_to_azure_blob(app_id: int, document_type: str, source_url: str, app
     parsed = urlparse(source)
     if parsed.scheme not in {"http", "https"}:
         return None, None, "invalid_source_url"
-    if _is_azure_blob_url(source):
-        return source, source, None
     client = _blob_service_client()
     if client is None:
         if BlobServiceClient is None:
             return None, None, "azure_sdk_not_installed"
         return None, None, "azure_storage_not_configured"
+    safe_name = _sanitize_filename_part(applicant_name or "")
+    if _is_azure_blob_url(source):
+        parsed_parts = _parse_blob_url(source)
+        if not parsed_parts:
+            return source, source, None
+        container_name, existing_blob_name = parsed_parts
+        existing_base = os.path.basename(existing_blob_name).lower()
+        if safe_name and safe_name in existing_base:
+            return existing_blob_name, source, None
+        source_blob_client = client.get_blob_client(container=container_name, blob=existing_blob_name)
+        props = source_blob_client.get_blob_properties()
+        content_type = (props.content_settings.content_type if props and props.content_settings else None) or "application/octet-stream"
+        content_bytes = source_blob_client.download_blob().readall()
+        new_blob_name = _build_blob_name(app_id, document_type, source, applicant_name=applicant_name)
+        target_blob_client = client.get_blob_client(container=AZURE_STORAGE_CONTAINER_NAME, blob=new_blob_name)
+        upload_kwargs: dict[str, Any] = {"overwrite": True}
+        if ContentSettings is not None:
+            upload_kwargs["content_settings"] = ContentSettings(content_type=content_type)
+        target_blob_client.upload_blob(content_bytes, **upload_kwargs)
+        return new_blob_name, target_blob_client.url, None
     resp = requests.get(source, timeout=45)
     if resp.status_code >= 400:
         if resp.status_code in {401, 403, 404}:
