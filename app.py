@@ -101,17 +101,23 @@ def _is_azure_blob_url(url: str) -> bool:
     return ".blob.core.windows.net/" in (url or "").lower()
 
 
-def _build_blob_name(app_id: int, document_type: str, original_url: str) -> str:
+def _sanitize_filename_part(value: str) -> str:
+    text = re.sub(r"[^a-zA-Z0-9]+", "-", (value or "").strip()).strip("-").lower()
+    return text[:80] if text else "unknown-applicant"
+
+
+def _build_blob_name(app_id: int, document_type: str, original_url: str, applicant_name: str | None = None) -> str:
     ext = ".pdf"
     parsed = urlparse(original_url or "")
     tail = (Path(parsed.path).name or "").strip()
     if "." in tail:
         ext = "." + tail.rsplit(".", 1)[-1].lower()
     safe_doc = re.sub(r"[^a-z0-9_-]+", "-", document_type.lower()).strip("-") or "document"
-    return f"{AZURE_STORAGE_BLOB_PREFIX}/{app_id}/{safe_doc}_{int(datetime.now(timezone.utc).timestamp())}{ext}"
+    safe_name = _sanitize_filename_part(applicant_name or "")
+    return f"{AZURE_STORAGE_BLOB_PREFIX}/{app_id}/{safe_name}_{safe_doc}_{int(datetime.now(timezone.utc).timestamp())}{ext}"
 
 
-def copy_url_to_azure_blob(app_id: int, document_type: str, source_url: str) -> tuple[str | None, str | None, str | None]:
+def copy_url_to_azure_blob(app_id: int, document_type: str, source_url: str, applicant_name: str | None = None) -> tuple[str | None, str | None, str | None]:
     source = (source_url or "").strip().strip('"').strip("'").strip("{}")
     if not source:
         return None, None, "empty_source"
@@ -130,7 +136,7 @@ def copy_url_to_azure_blob(app_id: int, document_type: str, source_url: str) -> 
         if resp.status_code in {401, 403, 404}:
             return None, None, f"source_expired_or_denied_{resp.status_code}"
         return None, None, f"source_download_failed_{resp.status_code}"
-    blob_name = _build_blob_name(app_id, document_type, source)
+    blob_name = _build_blob_name(app_id, document_type, source, applicant_name=applicant_name)
     blob_client = client.get_blob_client(container=AZURE_STORAGE_CONTAINER_NAME, blob=blob_name)
     ctype = (resp.headers.get("Content-Type") or "application/octet-stream").split(";")[0].strip()
     upload_kwargs: dict[str, Any] = {"overwrite": True}
@@ -151,6 +157,7 @@ def build_read_sas_url(blob_url: str) -> str:
     if len(path_parts) != 2:
         return text
     container, blob_name = path_parts
+    download_name = os.path.basename(blob_name) or "document.pdf"
     try:
         token = generate_blob_sas(
             account_name=AZURE_STORAGE_ACCOUNT_NAME,
@@ -159,6 +166,7 @@ def build_read_sas_url(blob_url: str) -> str:
             account_key=AZURE_STORAGE_ACCOUNT_KEY,
             permission=BlobSasPermissions(read=True),
             expiry=datetime.now(timezone.utc) + timedelta(minutes=AZURE_STORAGE_SAS_TTL_MINUTES),
+            content_disposition=f'attachment; filename="{download_name}"',
         )
         return f"{parsed.scheme}://{parsed.netloc}/{container}/{blob_name}?{token}"
     except Exception:
@@ -950,7 +958,9 @@ def extract_file_urls(value: Any) -> list[str]:
 
 
 def persist_document_record(cursor, app_id: int, document_type: str, source_url: str) -> str:
-    blob_name, blob_url, error = copy_url_to_azure_blob(app_id, document_type, source_url)
+    applicant_row = cursor.execute("SELECT TOP 1 full_name FROM dbo.job_applications WHERE id = ?", (app_id,)).fetchone()
+    applicant_name = clean_text(applicant_row[0]) if applicant_row else None
+    blob_name, blob_url, error = copy_url_to_azure_blob(app_id, document_type, source_url, applicant_name=applicant_name)
     status = "uploaded" if blob_url else ("manual_required" if error and "expired_or_denied" in error else "failed")
     needs_manual = 1 if status == "manual_required" else 0
     cursor.execute(
