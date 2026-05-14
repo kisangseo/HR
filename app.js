@@ -329,7 +329,7 @@ function renderActionCell(applicant) {
     <div><button type="button" class="small-btn danger" data-action="deny-disqualified" data-id="${applicant.id}" data-email="${escapeHtml(applicant.email || '')}">Deny - Disqualified</button></div>
   `;
   if (status === 'denied') {
-    return `<div class="action-buttons">${denyButtons}<button type="button" class="small-btn" data-action="undo-denial" data-id="${applicant.id}">Undo Denial</button></div>`;
+    return `<div class="action-buttons"><div><button type="button" class="small-btn" data-action="undo-denial" data-id="${applicant.id}">Undo Denial</button></div></div>`;
   }
   if (status !== 'needs attention') return `<div class="action-buttons">${denyButtons}</div>`;
   return `
