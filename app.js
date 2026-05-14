@@ -1,6 +1,7 @@
 const state = {
   applicants: [],
-  selectedIds: new Set()
+  selectedIds: new Set(),
+  latestApplicantsRequestId: 0
 };
 
 const els = {
@@ -12,7 +13,8 @@ const els = {
   clearFiltersBtn: document.getElementById('clearFiltersBtn'),
   applicantRows: document.getElementById('applicantRows'),
   selectAllVisible: document.getElementById('selectAllVisible'),
-  denySelectedBtn: document.getElementById('denySelectedBtn'),
+  denyNotSelectedBtn: document.getElementById('denyNotSelectedBtn'),
+  denyDisqualifiedBtn: document.getElementById('denyDisqualifiedBtn'),
   undoDeniedSelectedBtn: document.getElementById('undoDeniedSelectedBtn')
 };
 
@@ -27,7 +29,8 @@ els.datePicker.addEventListener('change', handleDateSelection);
 els.jobTitleFilter.addEventListener('change', loadApplicants);
 els.statusFilter.addEventListener('change', loadApplicants);
 els.selectAllVisible.addEventListener('change', toggleSelectAllVisible);
-els.denySelectedBtn.addEventListener('click', denySelectedApplicants);
+els.denyNotSelectedBtn.addEventListener('click', () => denySelectedApplicants('soft', 'Not Selected'));
+els.denyDisqualifiedBtn.addEventListener('click', () => denySelectedApplicants('permanent', 'Disqualified'));
 els.undoDeniedSelectedBtn.addEventListener('click', undoDeniedSelectedApplicants);
 
 els.clearFiltersBtn.addEventListener('click', () => {
@@ -87,6 +90,7 @@ function renderDateRangeFilter(awaitingSecond = false) {
 }
 
 async function loadApplicants() {
+  const requestId = ++state.latestApplicantsRequestId;
   const dateFrom = dateRangeState.from;
   const dateTo = dateRangeState.to || dateRangeState.from;
   const params = new URLSearchParams({
@@ -99,6 +103,7 @@ async function loadApplicants() {
 
   const response = await fetch(`/api/applicants?${params.toString()}`);
   const payload = await readJsonResponse(response, 'Failed to load applicants');
+  if (requestId !== state.latestApplicantsRequestId) return;
   state.applicants = payload.applicants || [];
   renderTable(state.applicants);
 }
@@ -141,7 +146,8 @@ function updateBulkActionUi() {
   const isDeniedView = String(els.statusFilter.value || '').trim().toLowerCase() === 'denied';
   els.selectAllVisible.checked = visibleIds.length > 0 && selectedVisibleCount === visibleIds.length;
   els.selectAllVisible.indeterminate = selectedVisibleCount > 0 && selectedVisibleCount < visibleIds.length;
-  els.denySelectedBtn.disabled = selectedVisibleCount === 0;
+  els.denyNotSelectedBtn.disabled = selectedVisibleCount === 0;
+  els.denyDisqualifiedBtn.disabled = selectedVisibleCount === 0;
   els.undoDeniedSelectedBtn.style.display = isDeniedView ? 'inline-block' : 'none';
   els.undoDeniedSelectedBtn.disabled = !isDeniedView || selectedVisibleCount === 0;
 }
@@ -155,13 +161,12 @@ function toggleSelectAllVisible() {
   renderTable(state.applicants);
 }
 
-async function denySelectedApplicants() {
+async function denySelectedApplicants(denialType, denialLabel) {
   const visibleIds = state.applicants.map((item) => item.id).filter((id) => state.selectedIds.has(id));
   if (!visibleIds.length) return;
-  const denialType = chooseDenialType();
-  if (!denialType) return;
-  if (!window.confirm(`Deny ${visibleIds.length} selected applicant(s)?`)) return;
-  els.denySelectedBtn.disabled = true;
+  if (!window.confirm(`Deny ${visibleIds.length} selected applicant(s) as "${denialLabel}"?`)) return;
+  els.denyNotSelectedBtn.disabled = true;
+  els.denyDisqualifiedBtn.disabled = true;
   try {
     const response = await fetch('/api/applicants/deny', {
       method: 'POST',
@@ -319,18 +324,18 @@ async function readJsonResponse(response, fallbackMessage) {
 
 function renderActionCell(applicant) {
   const status = String(applicant.status || '').toLowerCase();
+  const denyButtons = `
+    <button type="button" class="small-btn danger" data-action="deny-not-selected" data-id="${applicant.id}" data-email="${escapeHtml(applicant.email || '')}">Deny - Not Selected</button>
+    <button type="button" class="small-btn danger" data-action="deny-disqualified" data-id="${applicant.id}" data-email="${escapeHtml(applicant.email || '')}">Deny - Disqualified</button>
+  `;
   if (status === 'denied') {
-    return `
-      <div class="action-buttons">
-        <button type="button" class="small-btn" data-action="undo-denial" data-id="${applicant.id}">Undo Denial</button>
-      </div>
-    `;
+    return `<div class="action-buttons">${denyButtons}<button type="button" class="small-btn" data-action="undo-denial" data-id="${applicant.id}">Undo Denial</button></div>`;
   }
-  if (status !== 'needs attention') return '—';
+  if (status !== 'needs attention') return `<div class="action-buttons">${denyButtons}</div>`;
   return `
     <div class="action-buttons">
+      ${denyButtons}
       <button type="button" class="small-btn" data-action="approve" data-id="${applicant.id}" data-email="${escapeHtml(applicant.email || '')}">Approve</button>
-      <button type="button" class="small-btn danger" data-action="deny" data-id="${applicant.id}" data-email="${escapeHtml(applicant.email || '')}">Deny</button>
     </div>
   `;
 }
@@ -345,14 +350,19 @@ els.applicantRows.addEventListener('click', async (event) => {
   if (!btn) return;
   const action = btn.getAttribute('data-action');
   const id = btn.getAttribute('data-id');
-  const denialType = action === 'deny' ? chooseDenialType() : null;
-  if (action === 'deny' && !denialType) return;
+  const denialTypeByAction = {
+    'deny-not-selected': { value: 'soft', label: 'Not Selected' },
+    'deny-disqualified': { value: 'permanent', label: 'Disqualified' }
+  };
+  const denialConfig = denialTypeByAction[action] || null;
+  if (denialConfig && !window.confirm(`Deny this applicant as "${denialConfig.label}"?`)) return;
+  const endpointAction = denialConfig ? 'deny' : action;
   btn.disabled = true;
   try {
-    const response = await fetch(`/api/applicants/${id}/${action}`, {
+    const response = await fetch(`/api/applicants/${id}/${endpointAction}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: action === 'deny' ? JSON.stringify({ denial_type: denialType }) : undefined
+      body: denialConfig ? JSON.stringify({ denial_type: denialConfig.value }) : undefined
     });
     await readJsonResponse(response, 'Action failed');
     await loadApplicants();
@@ -362,15 +372,6 @@ els.applicantRows.addEventListener('click', async (event) => {
     btn.disabled = false;
   }
 });
-
-function chooseDenialType() {
-  const selection = window.prompt('Choose denial type: enter "1" for Permanent or "2" for Soft.');
-  const value = String(selection || '').trim().toLowerCase();
-  if (value === '1' || value === 'permanent') return 'permanent';
-  if (value === '2' || value === 'soft') return 'soft';
-  alert('Denial canceled. Please enter 1 (Permanent) or 2 (Soft).');
-  return null;
-}
 
 els.applicantRows.addEventListener('change', async (event) => {
   const selectCheckbox = event.target.closest('input[type="checkbox"][data-select-id]');
