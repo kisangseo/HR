@@ -325,8 +325,8 @@ async function readJsonResponse(response, fallbackMessage) {
 function renderActionCell(applicant) {
   const status = String(applicant.status || '').toLowerCase();
   const denyButtons = `
-    <button type="button" class="small-btn danger" data-action="deny-not-selected" data-id="${applicant.id}" data-email="${escapeHtml(applicant.email || '')}">Deny - Not Selected</button>
-    <button type="button" class="small-btn danger" data-action="deny-disqualified" data-id="${applicant.id}" data-email="${escapeHtml(applicant.email || '')}">Deny - Disqualified</button>
+    <div><button type="button" class="small-btn danger" data-action="deny-not-selected" data-id="${applicant.id}" data-email="${escapeHtml(applicant.email || '')}">Deny - Not Selected</button></div>
+    <div><button type="button" class="small-btn danger" data-action="deny-disqualified" data-id="${applicant.id}" data-email="${escapeHtml(applicant.email || '')}">Deny - Disqualified</button></div>
   `;
   if (status === 'denied') {
     return `<div class="action-buttons">${denyButtons}<button type="button" class="small-btn" data-action="undo-denial" data-id="${applicant.id}">Undo Denial</button></div>`;

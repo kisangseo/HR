@@ -780,44 +780,41 @@ def upsert_background_record(cursor, mapped: dict[str, Any], payload: dict[str, 
         """,
         (email_norm, email_norm, phone_norm, phone_norm),
     ).fetchone()
-    if not row:
-        app_id = upsert_cognito_record(cursor, mapped, payload)
-    else:
-        app_id = int(row[0])
-        background_pdf_url = clean_text(payload.get("background_pdf_url"))
-        if background_pdf_url:
-            background_pdf_url = persist_document_record(cursor, app_id, "background_check_form", background_pdf_url)
-        background_document_url = clean_text(payload.get("background_document_url"))
-        if background_document_url:
-            background_document_url = persist_document_record(cursor, app_id, "background_check_document", background_document_url)
-        drivers_license_urls = [persist_document_record(cursor, app_id, "drivers_license", url) for url in extract_file_urls(payload.get("drivers_license_files") or payload.get("drivers_license_urls") or payload.get("drivers_license_document_urls") or payload.get("drivers_license_document_url"))]
-        dd214_urls = [persist_document_record(cursor, app_id, "dd214", url) for url in extract_file_urls(payload.get("dd214_files") or payload.get("dd214_urls") or payload.get("dd214_document_urls") or payload.get("dd214_document_url"))]
-        diploma_urls = [persist_document_record(cursor, app_id, "diploma", url) for url in extract_file_urls(payload.get("diploma_files") or payload.get("diploma_urls") or payload.get("diploma_document_urls") or payload.get("diploma_document_url"))]
-        cursor.execute(
-            """
-            UPDATE dbo.job_applications
-            SET status = 'Background Check Submitted',
-                raw_payload = ?,
-                background_pdf_url = COALESCE(NULLIF(?, ''), background_pdf_url),
-                background_document_url = COALESCE(NULLIF(?, ''), background_document_url),
-                drivers_license_document_urls = COALESCE(NULLIF(?, ''), drivers_license_document_urls),
-                dd214_document_urls = COALESCE(NULLIF(?, ''), dd214_document_urls),
-                diploma_document_urls = COALESCE(NULLIF(?, ''), diploma_document_urls),
-                background_submitted_at = COALESCE(TRY_CAST(? AS DATETIME2), background_submitted_at),
-                last_cognito_sync_at = SYSUTCDATETIME()
-            WHERE id = ?
-            """,
-            (
-                json.dumps(payload),
-                background_pdf_url,
-                background_document_url,
-                json.dumps(drivers_license_urls),
-                json.dumps(dd214_urls),
-                json.dumps(diploma_urls),
-                payload.get("cognito_date_submitted"),
-                app_id,
-            ),
-        )
+    app_id = upsert_cognito_record(cursor, mapped, payload) if not row else int(row[0])
+    background_pdf_url = clean_text(payload.get("background_pdf_url"))
+    if background_pdf_url:
+        background_pdf_url = persist_document_record(cursor, app_id, "background_check_form", background_pdf_url)
+    background_document_url = clean_text(payload.get("background_document_url"))
+    if background_document_url:
+        background_document_url = persist_document_record(cursor, app_id, "background_check_document", background_document_url)
+    drivers_license_urls = [persist_document_record(cursor, app_id, "drivers_license", url) for url in extract_file_urls(payload.get("drivers_license_files") or payload.get("drivers_license_urls") or payload.get("drivers_license_document_urls") or payload.get("drivers_license_document_url"))]
+    dd214_urls = [persist_document_record(cursor, app_id, "dd214", url) for url in extract_file_urls(payload.get("dd214_files") or payload.get("dd214_urls") or payload.get("dd214_document_urls") or payload.get("dd214_document_url"))]
+    diploma_urls = [persist_document_record(cursor, app_id, "diploma", url) for url in extract_file_urls(payload.get("diploma_files") or payload.get("diploma_urls") or payload.get("diploma_document_urls") or payload.get("diploma_document_url"))]
+    cursor.execute(
+        """
+        UPDATE dbo.job_applications
+        SET status = 'Background Check Submitted',
+            raw_payload = ?,
+            background_pdf_url = COALESCE(NULLIF(?, ''), background_pdf_url),
+            background_document_url = COALESCE(NULLIF(?, ''), background_document_url),
+            drivers_license_document_urls = COALESCE(NULLIF(?, ''), drivers_license_document_urls),
+            dd214_document_urls = COALESCE(NULLIF(?, ''), dd214_document_urls),
+            diploma_document_urls = COALESCE(NULLIF(?, ''), diploma_document_urls),
+            background_submitted_at = COALESCE(TRY_CAST(? AS DATETIME2), background_submitted_at),
+            last_cognito_sync_at = SYSUTCDATETIME()
+        WHERE id = ?
+        """,
+        (
+            json.dumps(payload),
+            background_pdf_url,
+            background_document_url,
+            json.dumps(drivers_license_urls),
+            json.dumps(dd214_urls),
+            json.dumps(diploma_urls),
+            payload.get("cognito_date_submitted"),
+            app_id,
+        ),
+    )
     return app_id
 
 
