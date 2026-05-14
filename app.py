@@ -971,8 +971,22 @@ def extract_file_urls(value: Any) -> list[str]:
         return urls
     if isinstance(value, str):
         text = value.strip()
-        if text:
-            urls.append(text)
+        if not text:
+            return urls
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                parsed = json.loads(text)
+                return extract_file_urls(parsed)
+            except Exception:
+                pass
+        matches = re.findall(r"https?://[^\s,\]\}\"']+", text)
+        if matches:
+            for match in matches:
+                cleaned = clean_text(match)
+                if cleaned:
+                    urls.append(cleaned)
+            return urls
+        urls.append(text)
         return urls
     if isinstance(value, dict):
         candidate = clean_text(value.get("file") or value.get("url"))
