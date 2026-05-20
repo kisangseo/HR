@@ -828,6 +828,26 @@ def upsert_background_record(cursor, mapped: dict[str, Any], payload: dict[str, 
     credit_report_urls = persist_latest("credit_report", payload.get("credit_report") or payload.get("credit_report_pdf") or payload.get("credit_report_file"))
     birth_certificate_urls = persist_latest("birth_certificate", payload.get("birth_cert") or payload.get("birth_certificate") or payload.get("birth_certificate_file"))
     passport_urls = persist_latest("passport", payload.get("passport") or payload.get("passport_file"))
+    references = payload.get("references")
+    if isinstance(references, list):
+        cursor.execute("DELETE FROM dbo.job_application_references WHERE job_application_id = ?", (app_id,))
+        for idx, reference in enumerate(references, start=1):
+            if not isinstance(reference, dict):
+                continue
+            ref_type = clean_text(reference.get("reference_type"))
+            ref_name = clean_text(reference.get("name"))
+            ref_phone = clean_text(reference.get("phone"))
+            ref_email = clean_text(reference.get("email"))
+            if not any([ref_type, ref_name, ref_phone, ref_email]):
+                continue
+            cursor.execute(
+                """
+                INSERT INTO dbo.job_application_references (
+                    job_application_id, reference_order, reference_type, name, phone, email
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (app_id, idx, ref_type, ref_name, ref_phone, ref_email),
+            )
     cursor.execute(
         """
         UPDATE dbo.job_applications
