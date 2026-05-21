@@ -4,6 +4,7 @@ import csv
 import io
 import json
 import logging
+import mimetypes
 import os
 import re
 
@@ -114,12 +115,18 @@ def _sanitize_filename_part(value: str) -> str:
     return text[:80] if text else "unknown-applicant"
 
 
-def _build_blob_name(app_id: int, document_type: str, original_url: str, applicant_name: str | None = None) -> str:
-    ext = ".pdf"
+def _build_blob_name(app_id: int, document_type: str, original_url: str, applicant_name: str | None = None, content_type: str | None = None) -> str:
+    ext = ""
     parsed = urlparse(original_url or "")
     tail = (Path(parsed.path).name or "").strip()
     if "." in tail:
         ext = "." + tail.rsplit(".", 1)[-1].lower()
+    if not ext and content_type:
+        guessed = mimetypes.guess_extension((content_type or "").split(";")[0].strip().lower())
+        if guessed:
+            ext = guessed
+    if not ext:
+        ext = ".bin"
     safe_doc = re.sub(r"[^a-z0-9_-]+", "-", document_type.lower()).strip("-") or "document"
     safe_name = _sanitize_filename_part(applicant_name or "")
     return f"{AZURE_STORAGE_BLOB_PREFIX}/{app_id}/{safe_name}_{safe_doc}_{int(datetime.now(timezone.utc).timestamp())}{ext}"
@@ -150,7 +157,7 @@ def copy_url_to_azure_blob(app_id: int, document_type: str, source_url: str, app
         props = source_blob_client.get_blob_properties()
         content_type = (props.content_settings.content_type if props and props.content_settings else None) or "application/octet-stream"
         content_bytes = source_blob_client.download_blob().readall()
-        new_blob_name = _build_blob_name(app_id, document_type, source, applicant_name=applicant_name)
+        new_blob_name = _build_blob_name(app_id, document_type, source, applicant_name=applicant_name, content_type=content_type)
         target_blob_client = client.get_blob_client(container=AZURE_STORAGE_CONTAINER_NAME, blob=new_blob_name)
         upload_kwargs: dict[str, Any] = {"overwrite": True}
         if ContentSettings is not None:
@@ -162,9 +169,9 @@ def copy_url_to_azure_blob(app_id: int, document_type: str, source_url: str, app
         if resp.status_code in {401, 403, 404}:
             return None, None, f"source_expired_or_denied_{resp.status_code}"
         return None, None, f"source_download_failed_{resp.status_code}"
-    blob_name = _build_blob_name(app_id, document_type, source, applicant_name=applicant_name)
-    blob_client = client.get_blob_client(container=AZURE_STORAGE_CONTAINER_NAME, blob=blob_name)
     ctype = (resp.headers.get("Content-Type") or "application/octet-stream").split(";")[0].strip()
+    blob_name = _build_blob_name(app_id, document_type, source, applicant_name=applicant_name, content_type=ctype)
+    blob_client = client.get_blob_client(container=AZURE_STORAGE_CONTAINER_NAME, blob=blob_name)
     upload_kwargs: dict[str, Any] = {"overwrite": True}
     if ContentSettings is not None:
         upload_kwargs["content_settings"] = ContentSettings(content_type=ctype)
