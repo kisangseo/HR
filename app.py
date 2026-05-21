@@ -816,15 +816,15 @@ def upsert_background_record(cursor, mapped: dict[str, Any], payload: dict[str, 
     app_id = upsert_cognito_record(cursor, mapped, payload) if not row else int(row[0])
     background_pdf_url = clean_text(payload.get("background_pdf_url"))
     if background_pdf_url:
-        background_pdf_url = persist_document_record(cursor, app_id, "background_check_form", background_pdf_url)
+        background_pdf_url = persist_document_record(cursor, app_id, "background_check_form", background_pdf_url, async_only=True)
     background_document_url = clean_text(payload.get("background_document_url"))
     if background_document_url:
-        background_document_url = persist_document_record(cursor, app_id, "background_check_document", background_document_url)
+        background_document_url = persist_document_record(cursor, app_id, "background_check_document", background_document_url, async_only=True)
     def persist_latest(document_type: str, value: Any) -> list[str]:
         urls = extract_file_urls(value)
         latest_url = ""
         for url in urls:
-            latest_url = persist_document_record(cursor, app_id, document_type, url)
+            latest_url = persist_document_record(cursor, app_id, document_type, url, async_only=True)
         return [latest_url] if latest_url else []
 
     drivers_license_urls = persist_latest("drivers_license", payload.get("drivers_license_files") or payload.get("drivers_license_urls") or payload.get("drivers_license_document_urls") or payload.get("drivers_license_document_url"))
@@ -1046,7 +1046,88 @@ def extract_file_urls(value: Any) -> list[str]:
     return urls
 
 
-def persist_document_record(cursor, app_id: int, document_type: str, source_url: str) -> str:
+def enqueue_document_record(cursor, app_id: int, document_type: str, source_url: str) -> str:
+    cursor.execute(
+        """
+        UPDATE dbo.job_application_documents
+        SET status = 'queued',
+            needs_manual = 0,
+            error_message = NULL,
+            updated_at = SYSUTCDATETIME(),
+            last_attempt_at = NULL
+        WHERE job_application_id = ? AND document_type = ? AND source_url = ?
+        """,
+        (app_id, document_type, source_url),
+    )
+    if cursor.rowcount == 0:
+        cursor.execute(
+            """
+            INSERT INTO dbo.job_application_documents (
+                job_application_id, document_type, source_url, azure_blob_name, azure_blob_url,
+                status, error_message, needs_manual, uploaded_at, last_attempt_at, updated_at
+            ) VALUES (?, ?, ?, NULL, NULL, 'queued', NULL, 0, NULL, NULL, SYSUTCDATETIME())
+            """,
+            (app_id, document_type, source_url),
+        )
+    return source_url
+
+
+def process_queued_document_batch(limit: int = 25) -> dict[str, int]:
+    processed = 0
+    uploaded = 0
+    failed = 0
+    manual_required = 0
+    with get_sql_connection() as conn:
+        cursor = conn.cursor()
+        rows = cursor.execute(
+            """
+            SELECT TOP (?) id, job_application_id, document_type, source_url
+            FROM dbo.job_application_documents
+            WHERE status IN ('queued', 'failed')
+              AND needs_manual = 0
+            ORDER BY id ASC
+            """,
+            (limit,),
+        ).fetchall()
+        for row in rows:
+            processed += 1
+            doc_id = int(row[0])
+            app_id = int(row[1])
+            document_type = str(row[2] or "")
+            source_url = str(row[3] or "")
+            applicant_row = cursor.execute("SELECT TOP 1 full_name FROM dbo.job_applications WHERE id = ?", (app_id,)).fetchone()
+            applicant_name = clean_text(applicant_row[0]) if applicant_row else None
+            blob_name, blob_url, error = copy_url_to_azure_blob(app_id, document_type, source_url, applicant_name=applicant_name)
+            status = "uploaded" if blob_url else ("manual_required" if error and "expired_or_denied" in error else "failed")
+            needs_manual = 1 if status == "manual_required" else 0
+            cursor.execute(
+                """
+                UPDATE dbo.job_application_documents
+                SET azure_blob_name = ?,
+                    azure_blob_url = ?,
+                    status = ?,
+                    error_message = ?,
+                    needs_manual = ?,
+                    uploaded_at = CASE WHEN ? = 'uploaded' THEN SYSUTCDATETIME() ELSE uploaded_at END,
+                    last_attempt_at = SYSUTCDATETIME(),
+                    updated_at = SYSUTCDATETIME()
+                WHERE id = ?
+                """,
+                (blob_name, blob_url, status, error, needs_manual, status, doc_id),
+            )
+            if status == "uploaded":
+                uploaded += 1
+            elif status == "manual_required":
+                manual_required += 1
+            else:
+                failed += 1
+        conn.commit()
+    return {"processed": processed, "uploaded": uploaded, "failed": failed, "manual_required": manual_required}
+
+
+def persist_document_record(cursor, app_id: int, document_type: str, source_url: str, async_only: bool = False) -> str:
+    if async_only:
+        return enqueue_document_record(cursor, app_id, document_type, source_url)
     applicant_row = cursor.execute("SELECT TOP 1 full_name FROM dbo.job_applications WHERE id = ?", (app_id,)).fetchone()
     applicant_name = clean_text(applicant_row[0]) if applicant_row else None
     blob_name, blob_url, error = copy_url_to_azure_blob(app_id, document_type, source_url, applicant_name=applicant_name)
@@ -2072,6 +2153,19 @@ def app(environ, start_response):
                 return _wsgi_json(start_response, {"source": "backfill-azure-blobs", **result})
             except Exception as exc:
                 logging.exception("/api/admin/backfill-azure-blobs failed")
+                return _wsgi_json(start_response, {"error": str(exc)}, 500)
+
+        if path == "/api/admin/process-document-queue":
+            provided_token = environ.get("HTTP_X_WEBHOOK_TOKEN", "")
+            if MAKE_WEBHOOK_TOKEN and provided_token != MAKE_WEBHOOK_TOKEN:
+                return _wsgi_json(start_response, {"error": "Unauthorized webhook token."}, 401)
+            try:
+                payload = parse_json_body(body_text or "{}")
+                limit = int(payload.get("limit") or 50)
+                result = process_queued_document_batch(limit=limit)
+                return _wsgi_json(start_response, {"source": "process-document-queue", **result})
+            except Exception as exc:
+                logging.exception("/api/admin/process-document-queue failed")
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
 
         if path == "/api/ingest-csv":
