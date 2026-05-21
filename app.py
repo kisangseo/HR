@@ -4,6 +4,7 @@ import csv
 import io
 import json
 import logging
+import mimetypes
 import os
 import re
 
@@ -114,12 +115,18 @@ def _sanitize_filename_part(value: str) -> str:
     return text[:80] if text else "unknown-applicant"
 
 
-def _build_blob_name(app_id: int, document_type: str, original_url: str, applicant_name: str | None = None) -> str:
-    ext = ".pdf"
+def _build_blob_name(app_id: int, document_type: str, original_url: str, applicant_name: str | None = None, content_type: str | None = None) -> str:
+    ext = ""
     parsed = urlparse(original_url or "")
     tail = (Path(parsed.path).name or "").strip()
     if "." in tail:
         ext = "." + tail.rsplit(".", 1)[-1].lower()
+    if not ext and content_type:
+        guessed = mimetypes.guess_extension((content_type or "").split(";")[0].strip().lower())
+        if guessed:
+            ext = guessed
+    if not ext:
+        ext = ".bin"
     safe_doc = re.sub(r"[^a-z0-9_-]+", "-", document_type.lower()).strip("-") or "document"
     safe_name = _sanitize_filename_part(applicant_name or "")
     return f"{AZURE_STORAGE_BLOB_PREFIX}/{app_id}/{safe_name}_{safe_doc}_{int(datetime.now(timezone.utc).timestamp())}{ext}"
@@ -150,7 +157,7 @@ def copy_url_to_azure_blob(app_id: int, document_type: str, source_url: str, app
         props = source_blob_client.get_blob_properties()
         content_type = (props.content_settings.content_type if props and props.content_settings else None) or "application/octet-stream"
         content_bytes = source_blob_client.download_blob().readall()
-        new_blob_name = _build_blob_name(app_id, document_type, source, applicant_name=applicant_name)
+        new_blob_name = _build_blob_name(app_id, document_type, source, applicant_name=applicant_name, content_type=content_type)
         target_blob_client = client.get_blob_client(container=AZURE_STORAGE_CONTAINER_NAME, blob=new_blob_name)
         upload_kwargs: dict[str, Any] = {"overwrite": True}
         if ContentSettings is not None:
@@ -162,9 +169,9 @@ def copy_url_to_azure_blob(app_id: int, document_type: str, source_url: str, app
         if resp.status_code in {401, 403, 404}:
             return None, None, f"source_expired_or_denied_{resp.status_code}"
         return None, None, f"source_download_failed_{resp.status_code}"
-    blob_name = _build_blob_name(app_id, document_type, source, applicant_name=applicant_name)
-    blob_client = client.get_blob_client(container=AZURE_STORAGE_CONTAINER_NAME, blob=blob_name)
     ctype = (resp.headers.get("Content-Type") or "application/octet-stream").split(";")[0].strip()
+    blob_name = _build_blob_name(app_id, document_type, source, applicant_name=applicant_name, content_type=ctype)
+    blob_client = client.get_blob_client(container=AZURE_STORAGE_CONTAINER_NAME, blob=blob_name)
     upload_kwargs: dict[str, Any] = {"overwrite": True}
     if ContentSettings is not None:
         upload_kwargs["content_settings"] = ContentSettings(content_type=ctype)
@@ -823,6 +830,31 @@ def upsert_background_record(cursor, mapped: dict[str, Any], payload: dict[str, 
     drivers_license_urls = persist_latest("drivers_license", payload.get("drivers_license_files") or payload.get("drivers_license_urls") or payload.get("drivers_license_document_urls") or payload.get("drivers_license_document_url"))
     dd214_urls = persist_latest("dd214", payload.get("dd214_files") or payload.get("dd214_urls") or payload.get("dd214_document_urls") or payload.get("dd214_document_url"))
     diploma_urls = persist_latest("diploma", payload.get("diploma_files") or payload.get("diploma_urls") or payload.get("diploma_document_urls") or payload.get("diploma_document_url"))
+    social_security_front_urls = persist_latest("social_security_front", payload.get("social_security_front") or payload.get("social_security_front_file") or payload.get("ss_front"))
+    social_security_back_urls = persist_latest("social_security_back", payload.get("social_security_back") or payload.get("social_security_back_file") or payload.get("ss_back"))
+    credit_report_urls = persist_latest("credit_report", payload.get("credit_report") or payload.get("credit_report_pdf") or payload.get("credit_report_file"))
+    birth_certificate_urls = persist_latest("birth_certificate", payload.get("birth_cert") or payload.get("birth_certificate") or payload.get("birth_certificate_file"))
+    passport_urls = persist_latest("passport", payload.get("passport") or payload.get("passport_file"))
+    references = payload.get("references")
+    if isinstance(references, list):
+        cursor.execute("DELETE FROM dbo.job_application_references WHERE job_application_id = ?", (app_id,))
+        for idx, reference in enumerate(references, start=1):
+            if not isinstance(reference, dict):
+                continue
+            ref_type = clean_text(reference.get("reference_type"))
+            ref_name = clean_text(reference.get("name"))
+            ref_phone = clean_text(reference.get("phone"))
+            ref_email = clean_text(reference.get("email"))
+            if not any([ref_type, ref_name, ref_phone, ref_email]):
+                continue
+            cursor.execute(
+                """
+                INSERT INTO dbo.job_application_references (
+                    job_application_id, reference_order, reference_type, name, phone, email
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (app_id, idx, ref_type, ref_name, ref_phone, ref_email),
+            )
     cursor.execute(
         """
         UPDATE dbo.job_applications
@@ -833,6 +865,11 @@ def upsert_background_record(cursor, mapped: dict[str, Any], payload: dict[str, 
             drivers_license_document_urls = COALESCE(NULLIF(?, ''), drivers_license_document_urls),
             dd214_document_urls = COALESCE(NULLIF(?, ''), dd214_document_urls),
             diploma_document_urls = COALESCE(NULLIF(?, ''), diploma_document_urls),
+            social_security_front_document_urls = COALESCE(NULLIF(?, ''), social_security_front_document_urls),
+            social_security_back_document_urls = COALESCE(NULLIF(?, ''), social_security_back_document_urls),
+            credit_report_document_urls = COALESCE(NULLIF(?, ''), credit_report_document_urls),
+            birth_certificate_document_urls = COALESCE(NULLIF(?, ''), birth_certificate_document_urls),
+            passport_document_urls = COALESCE(NULLIF(?, ''), passport_document_urls),
             background_submitted_at = COALESCE(TRY_CAST(? AS DATETIME2), background_submitted_at),
             last_cognito_sync_at = SYSUTCDATETIME()
         WHERE id = ?
@@ -844,6 +881,11 @@ def upsert_background_record(cursor, mapped: dict[str, Any], payload: dict[str, 
             json.dumps(drivers_license_urls),
             json.dumps(dd214_urls),
             json.dumps(diploma_urls),
+            json.dumps(social_security_front_urls),
+            json.dumps(social_security_back_urls),
+            json.dumps(credit_report_urls),
+            json.dumps(birth_certificate_urls),
+            json.dumps(passport_urls),
             payload.get("cognito_date_submitted"),
             app_id,
         ),
