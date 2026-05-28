@@ -1072,11 +1072,90 @@ def enqueue_document_record(cursor, app_id: int, document_type: str, source_url:
     return source_url
 
 
+APPLICATION_DOCUMENT_LINK_COLUMNS: dict[str, tuple[str, bool]] = {
+    "initial_application": ("cognito_document_link", False),
+    "background_check_form": ("background_pdf_url", False),
+    "background_check_document": ("background_document_url", False),
+    "resume": ("resume_file_url", False),
+    "drivers_license": ("drivers_license_document_urls", True),
+    "dd214": ("dd214_document_urls", True),
+    "diploma": ("diploma_document_urls", True),
+    "social_security_front": ("social_security_front_document_urls", True),
+    "social_security_back": ("social_security_back_document_urls", True),
+    "credit_report": ("credit_report_document_urls", True),
+    "birth_certificate": ("birth_certificate_document_urls", True),
+    "passport": ("passport_document_urls", True),
+}
+
+
+def update_application_document_link(cursor, app_id: int, document_type: str, blob_url: str) -> bool:
+    column_info = APPLICATION_DOCUMENT_LINK_COLUMNS.get(document_type)
+    if not column_info or not blob_url:
+        return False
+    column_name, stores_json_array = column_info
+    current_row = cursor.execute(
+        f"SELECT {column_name} FROM dbo.job_applications WHERE id = ?",
+        (app_id,),
+    ).fetchone()
+    if not current_row:
+        return False
+    current_value = current_row[0]
+    if stores_json_array and parse_json_array_text(current_value)[-1:] == [blob_url]:
+        return False
+    if not stores_json_array and clean_text(current_value) == blob_url:
+        return False
+    stored_value = json.dumps([blob_url]) if stores_json_array else blob_url
+    cursor.execute(
+        f"""
+        UPDATE dbo.job_applications
+        SET {column_name} = ?,
+            last_cognito_sync_at = SYSUTCDATETIME()
+        WHERE id = ?
+        """,
+        (stored_value, app_id),
+    )
+    updated = cursor.rowcount != 0
+    if updated:
+        logging.info(
+            "document_visible_link_updated app_id=%s document_type=%s column=%s blob_url=%s",
+            app_id,
+            document_type,
+            column_name,
+            blob_url,
+        )
+    return updated
+
+
+def sync_uploaded_document_links(cursor, limit: int = 250) -> int:
+    document_types = tuple(APPLICATION_DOCUMENT_LINK_COLUMNS)
+    placeholders = ", ".join("?" for _ in document_types)
+    rows = cursor.execute(
+        f"""
+        SELECT TOP (?) job_application_id, document_type, azure_blob_url
+        FROM dbo.job_application_documents
+        WHERE status = 'uploaded'
+          AND azure_blob_url IS NOT NULL
+          AND document_type IN ({placeholders})
+        ORDER BY id DESC
+        """,
+        (limit, *document_types),
+    ).fetchall()
+    updated = 0
+    for row in reversed(rows):
+        app_id = int(row[0])
+        document_type = str(row[1] or "")
+        blob_url = clean_text(row[2])
+        if update_application_document_link(cursor, app_id, document_type, blob_url):
+            updated += 1
+    return updated
+
+
 def process_queued_document_batch(limit: int = 25) -> dict[str, int]:
     processed = 0
     uploaded = 0
     failed = 0
     manual_required = 0
+    visible_links_updated = 0
     with get_sql_connection() as conn:
         cursor = conn.cursor()
         rows = cursor.execute(
@@ -1117,12 +1196,21 @@ def process_queued_document_batch(limit: int = 25) -> dict[str, int]:
             )
             if status == "uploaded":
                 uploaded += 1
+                if update_application_document_link(cursor, app_id, document_type, blob_url or ""):
+                    visible_links_updated += 1
             elif status == "manual_required":
                 manual_required += 1
             else:
                 failed += 1
+        visible_links_updated += sync_uploaded_document_links(cursor)
         conn.commit()
-    return {"processed": processed, "uploaded": uploaded, "failed": failed, "manual_required": manual_required}
+    return {
+        "processed": processed,
+        "uploaded": uploaded,
+        "failed": failed,
+        "manual_required": manual_required,
+        "visible_links_updated": visible_links_updated,
+    }
 
 
 def persist_document_record(cursor, app_id: int, document_type: str, source_url: str, async_only: bool = False) -> str:
@@ -2475,6 +2563,40 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(exc)}, 404)
             except Exception as exc:
                 logging.exception("/api/job-app-docs failed")
+                self._send_json({"error": str(exc)}, 500)
+            return
+
+        if parsed.path == "/api/admin/backfill-azure-blobs":
+            content_length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(content_length).decode("utf-8")
+            provided_token = self.headers.get("X-Webhook-Token", "")
+            if MAKE_WEBHOOK_TOKEN and provided_token != MAKE_WEBHOOK_TOKEN:
+                self._send_json({"error": "Unauthorized webhook token."}, 401)
+                return
+            try:
+                payload = parse_json_body(body or "{}")
+                limit = int(payload.get("limit") or 200)
+                result = run_blob_backfill(limit=limit)
+                self._send_json({"source": "backfill-azure-blobs", **result})
+            except Exception as exc:
+                logging.exception("/api/admin/backfill-azure-blobs failed")
+                self._send_json({"error": str(exc)}, 500)
+            return
+
+        if parsed.path == "/api/admin/process-document-queue":
+            content_length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(content_length).decode("utf-8")
+            provided_token = self.headers.get("X-Webhook-Token", "")
+            if MAKE_WEBHOOK_TOKEN and provided_token != MAKE_WEBHOOK_TOKEN:
+                self._send_json({"error": "Unauthorized webhook token."}, 401)
+                return
+            try:
+                payload = parse_json_body(body or "{}")
+                limit = int(payload.get("limit") or 50)
+                result = process_queued_document_batch(limit=limit)
+                self._send_json({"source": "process-document-queue", **result})
+            except Exception as exc:
+                logging.exception("/api/admin/process-document-queue failed")
                 self._send_json({"error": str(exc)}, 500)
             return
 
