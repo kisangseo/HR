@@ -7,6 +7,7 @@ import logging
 import mimetypes
 import os
 import re
+import threading
 
 import msal
 import requests
@@ -878,14 +879,14 @@ def upsert_background_record(cursor, mapped: dict[str, Any], payload: dict[str, 
             json.dumps(payload),
             background_pdf_url,
             background_document_url,
-            json.dumps(drivers_license_urls),
-            json.dumps(dd214_urls),
-            json.dumps(diploma_urls),
-            json.dumps(social_security_front_urls),
-            json.dumps(social_security_back_urls),
-            json.dumps(credit_report_urls),
-            json.dumps(birth_certificate_urls),
-            json.dumps(passport_urls),
+            (json.dumps(drivers_license_urls) if drivers_license_urls else ""),
+            (json.dumps(dd214_urls) if dd214_urls else ""),
+            (json.dumps(diploma_urls) if diploma_urls else ""),
+            (json.dumps(social_security_front_urls) if social_security_front_urls else ""),
+            (json.dumps(social_security_back_urls) if social_security_back_urls else ""),
+            (json.dumps(credit_report_urls) if credit_report_urls else ""),
+            (json.dumps(birth_certificate_urls) if birth_certificate_urls else ""),
+            (json.dumps(passport_urls) if passport_urls else ""),
             payload.get("cognito_date_submitted"),
             app_id,
         ),
@@ -1069,7 +1070,7 @@ def enqueue_document_record(cursor, app_id: int, document_type: str, source_url:
             """,
             (app_id, document_type, source_url),
         )
-    return source_url
+    return ""
 
 
 APPLICATION_DOCUMENT_LINK_COLUMNS: dict[str, tuple[str, bool]] = {
@@ -1150,6 +1151,10 @@ def sync_uploaded_document_links(cursor, limit: int = 250) -> int:
     return updated
 
 
+_DOCUMENT_QUEUE_KICK_LOCK = threading.Lock()
+_DOCUMENT_QUEUE_KICK_RUNNING = False
+
+
 def process_queued_document_batch(limit: int = 25) -> dict[str, int]:
     processed = 0
     uploaded = 0
@@ -1211,6 +1216,28 @@ def process_queued_document_batch(limit: int = 25) -> dict[str, int]:
         "manual_required": manual_required,
         "visible_links_updated": visible_links_updated,
     }
+
+
+def kick_document_queue_processing(limit: int = 25) -> bool:
+    global _DOCUMENT_QUEUE_KICK_RUNNING
+    with _DOCUMENT_QUEUE_KICK_LOCK:
+        if _DOCUMENT_QUEUE_KICK_RUNNING:
+            return False
+        _DOCUMENT_QUEUE_KICK_RUNNING = True
+
+    def worker() -> None:
+        global _DOCUMENT_QUEUE_KICK_RUNNING
+        try:
+            result = process_queued_document_batch(limit=limit)
+            logging.info("document_queue_kick_completed result=%s", result)
+        except Exception:
+            logging.exception("document_queue_kick_failed")
+        finally:
+            with _DOCUMENT_QUEUE_KICK_LOCK:
+                _DOCUMENT_QUEUE_KICK_RUNNING = False
+
+    threading.Thread(target=worker, name="document-queue-kick", daemon=True).start()
+    return True
 
 
 def persist_document_record(cursor, app_id: int, document_type: str, source_url: str, async_only: bool = False) -> str:
@@ -2184,7 +2211,8 @@ def app(environ, start_response):
                     cursor = conn.cursor()
                     app_id = upsert_background_record(cursor, mapped, payload)
                     conn.commit()
-                return _wsgi_json(start_response, {"inserted": 1, "source": "background_check", "job_application_id": app_id})
+                queue_worker_started = kick_document_queue_processing(limit=25)
+                return _wsgi_json(start_response, {"inserted": 1, "source": "background_check", "job_application_id": app_id, "queue_worker_started": queue_worker_started})
             except Exception as exc:
                 logging.exception("/api/ingest-background-form failed")
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
@@ -2507,7 +2535,8 @@ class Handler(BaseHTTPRequestHandler):
                     cursor = conn.cursor()
                     app_id = upsert_background_record(cursor, mapped, payload)
                     conn.commit()
-                self._send_json({"inserted": 1, "source": "background_check", "job_application_id": app_id})
+                queue_worker_started = kick_document_queue_processing(limit=25)
+                self._send_json({"inserted": 1, "source": "background_check", "job_application_id": app_id, "queue_worker_started": queue_worker_started})
             except Exception as exc:
                 logging.exception("/api/ingest-background-form failed")
                 self._send_json({"error": str(exc)}, 500)
