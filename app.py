@@ -103,6 +103,16 @@ def _is_azure_blob_url(url: str) -> bool:
     return ".blob.core.windows.net/" in (url or "").lower()
 
 
+def is_publishable_document_url(url: Any) -> bool:
+    text = str(url or "").strip()
+    return bool(text) and _is_azure_blob_url(text)
+
+
+def publishable_document_url(url: Any) -> str:
+    text = clean_text(url)
+    return text if is_publishable_document_url(text) else ""
+
+
 def _parse_blob_url(blob_url: str) -> tuple[str, str] | None:
     parsed = urlparse(blob_url or "")
     parts = parsed.path.lstrip("/").split("/", 1)
@@ -646,6 +656,7 @@ def upsert_cognito_record(cursor, mapped: dict[str, Any], payload: dict[str, Any
     drivers_license_state = clean_text(payload.get("drivers_license_state"))
     resume_file_name = clean_text(payload.get("resume_file_name"))
     resume_file_url = clean_text(payload.get("resume_file_url"))
+    resume_visible_url = publishable_document_url(resume_file_url)
     resume_content_type = clean_text(payload.get("resume_content_type"))
     signature_png_url = clean_text(payload.get("signature_png_url"))
     signature_svg_url = clean_text(payload.get("signature_svg_url"))
@@ -672,7 +683,12 @@ def upsert_cognito_record(cursor, mapped: dict[str, Any], payload: dict[str, Any
     if candidates:
         app_id = int(candidates[0])
         if cognito_document_link:
-            cognito_document_link = persist_document_record(cursor, app_id, "initial_application", cognito_document_link)
+            cognito_document_link = persist_document_record(cursor, app_id, "initial_application", cognito_document_link, async_only=True)
+        elif cognito_pdf_url:
+            logging.info("initial_application_missing_cognito_document_link app_id=%s using_cognito_pdf_url_fallback", app_id)
+            cognito_document_link = persist_document_record(cursor, app_id, "initial_application", cognito_pdf_url, async_only=True)
+        if resume_file_url:
+            resume_visible_url = persist_document_record(cursor, app_id, "resume", resume_file_url, async_only=True)
         cursor.execute(
             """
             UPDATE dbo.job_applications
@@ -734,12 +750,12 @@ def upsert_cognito_record(cursor, mapped: dict[str, Any], payload: dict[str, Any
             (
                 mapped["submitted_at"], first_name, last_name, middle_name, email, phone, mapped["primary_position"], json.dumps(mapped["other_positions"]), status, json.dumps(payload),
                 first_norm, last_norm, email_norm, phone_norm, cognito_form_id, cognito_entry_number, cognito_entry_id,
-                clean_text(payload.get("cognito_internal_link")), clean_text(payload.get("cognito_public_link")), clean_text(payload.get("cognito_admin_link")), cognito_document_link,
+                clean_text(payload.get("cognito_internal_link")), clean_text(payload.get("cognito_public_link")), clean_text(payload.get("cognito_admin_link")), (cognito_document_link or None),
                 payload.get("cognito_date_created"), payload.get("cognito_date_submitted"), payload.get("cognito_date_updated"),
                 address_line1, address_line2, city, state, postal_code, country, country_code, full_address,
                 consent_background_investigation, has_valid_drivers_license, drivers_license_number, drivers_license_state, felony_conviction,
                 domestic_violence_misdemeanor, protective_order, currently_under_charges, unlawful_drug_use_last_3y, prior_police_service,
-                resume_file_name, resume_file_url, resume_content_type, signature_png_url, signature_svg_url, signature_typed_text,
+                resume_file_name, (resume_visible_url or None), resume_content_type, signature_png_url, signature_svg_url, signature_typed_text,
                 cognito_pdf_url, cognito_pdf_url, app_id
             ),
         )
@@ -770,23 +786,23 @@ def upsert_cognito_record(cursor, mapped: dict[str, Any], payload: dict[str, Any
             (
                 mapped["submitted_at"], first_name, last_name, middle_name, email, phone, mapped["primary_position"], json.dumps(mapped["other_positions"]), status, json.dumps(payload),
                 first_norm, last_norm, email_norm, phone_norm, cognito_form_id, cognito_entry_number, cognito_entry_id,
-                clean_text(payload.get("cognito_internal_link")), clean_text(payload.get("cognito_public_link")), clean_text(payload.get("cognito_admin_link")), clean_text(payload.get("cognito_document_link")),
+                clean_text(payload.get("cognito_internal_link")), clean_text(payload.get("cognito_public_link")), clean_text(payload.get("cognito_admin_link")), publishable_document_url(cognito_document_link),
                 payload.get("cognito_date_created"), payload.get("cognito_date_submitted"), payload.get("cognito_date_updated"),
                 address_line1, address_line2, city, state, postal_code, country, country_code, full_address,
                 consent_background_investigation, has_valid_drivers_license, drivers_license_number, drivers_license_state,
                 felony_conviction, domestic_violence_misdemeanor, protective_order, currently_under_charges, unlawful_drug_use_last_3y, prior_police_service,
-                resume_file_name, resume_file_url, resume_content_type, signature_png_url, signature_svg_url, signature_typed_text,
+                resume_file_name, resume_visible_url, resume_content_type, signature_png_url, signature_svg_url, signature_typed_text,
                 cognito_pdf_url, cognito_pdf_url
             ),
         )
         app_id = int(inserted_row.fetchone()[0])
         if cognito_document_link:
-            cognito_document_link = persist_document_record(cursor, app_id, "initial_application", cognito_document_link)
-            cursor.execute("UPDATE dbo.job_applications SET cognito_document_link = ? WHERE id = ?", (cognito_document_link, app_id))
+            persist_document_record(cursor, app_id, "initial_application", cognito_document_link, async_only=True)
         elif cognito_pdf_url:
             logging.info("initial_application_missing_cognito_document_link app_id=%s using_cognito_pdf_url_fallback", app_id)
-            cognito_pdf_url = persist_document_record(cursor, app_id, "initial_application", cognito_pdf_url)
-            cursor.execute("UPDATE dbo.job_applications SET cognito_document_link = ? WHERE id = ?", (cognito_pdf_url, app_id))
+            persist_document_record(cursor, app_id, "initial_application", cognito_pdf_url, async_only=True)
+        if resume_file_url:
+            persist_document_record(cursor, app_id, "resume", resume_file_url, async_only=True)
 
     cursor.execute(
         """
@@ -942,7 +958,9 @@ def upsert_job_app_docs(cursor, payload: dict[str, Any]) -> dict[str, Any]:
         latest_url = existing[-1] if existing else ""
         for incoming_value in incoming_values:
             for url in extract_file_urls(incoming_value):
-                latest_url = persist_document_record(cursor, app_id, document_type, url)
+                persisted_url = persist_document_record(cursor, app_id, document_type, url)
+                if persisted_url:
+                    latest_url = persisted_url
         return [latest_url] if latest_url else []
 
     def pick_doc_values(*keys: str) -> list[Any]:
@@ -1266,7 +1284,7 @@ def persist_document_record(cursor, app_id: int, document_type: str, source_url:
         blob_name,
         error,
     )
-    return blob_url or source_url
+    return blob_url or ""
 
 
 def build_record_from_make(payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -1478,6 +1496,10 @@ def build_document_links(cognito_pdf_url: Any, cognito_document_link: Any, backg
     def add(label: str, url: Any):
         text = str(url or "").strip()
         if not text:
+            return
+        if not is_publishable_document_url(text):
+            log_key = "skipping_cognito_document_link" if _is_cognito_link(text) else "skipping_non_blob_document_link"
+            logging.warning("%s label=%s url=%s", log_key, label, text)
             return
         if any(item["url"] == text for item in links):
             return
@@ -1702,7 +1724,7 @@ def run_blob_backfill(limit: int = 200) -> dict[str, int]:
                         updated,
                         updated != original,
                     )
-                if updated != original:
+                if updated and updated != original:
                     cursor.execute(f"UPDATE dbo.job_applications SET {col_name} = ? WHERE id = ?", (updated, app_id))
                     migrated += 1
             for doc_type, idx, col_name in [("drivers_license", 5, "drivers_license_document_urls"), ("dd214", 6, "dd214_document_urls"), ("diploma", 7, "diploma_document_urls"), ("social_security_front", 8, "social_security_front_document_urls"), ("social_security_back", 9, "social_security_back_document_urls"), ("credit_report", 10, "credit_report_document_urls"), ("birth_certificate", 11, "birth_certificate_document_urls"), ("passport", 12, "passport_document_urls")]:
@@ -1710,7 +1732,8 @@ def run_blob_backfill(limit: int = 200) -> dict[str, int]:
                 replaced: list[str] = []
                 for url in current:
                     try:
-                        replaced.append(persist_document_record(cursor, app_id, doc_type, url))
+                        updated_url = persist_document_record(cursor, app_id, doc_type, url)
+                        replaced.append(updated_url or url)
                     except Exception:
                         logging.exception("backfill persist failed app_id=%s doc_type=%s", app_id, doc_type)
                         replaced.append(url)
@@ -2234,7 +2257,8 @@ def app(environ, start_response):
                     cursor = conn.cursor()
                     app_id = upsert_cognito_record(cursor, mapped, payload)
                     conn.commit()
-                return _wsgi_json(start_response, {"inserted": 1, "source": "cognito", "job_application_id": app_id})
+                queue_worker_started = kick_document_queue_processing(limit=25)
+                return _wsgi_json(start_response, {"inserted": 1, "source": "cognito", "job_application_id": app_id, "queue_worker_started": queue_worker_started})
             except Exception as exc:
                 logging.exception("/api/ingest-cognito-form failed")
                 return _wsgi_json(start_response, {"error": str(exc)}, 500)
@@ -2565,7 +2589,8 @@ class Handler(BaseHTTPRequestHandler):
                     cursor = conn.cursor()
                     app_id = upsert_cognito_record(cursor, mapped, payload)
                     conn.commit()
-                self._send_json({"inserted": 1, "source": "cognito", "job_application_id": app_id})
+                queue_worker_started = kick_document_queue_processing(limit=25)
+                self._send_json({"inserted": 1, "source": "cognito", "job_application_id": app_id, "queue_worker_started": queue_worker_started})
             except Exception as exc:
                 logging.exception("/api/ingest-cognito-form failed")
                 self._send_json({"error": str(exc)}, 500)
