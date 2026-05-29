@@ -89,6 +89,34 @@ BEGIN
 END;
 GO
 
+IF OBJECT_ID('dbo.job_application_references', 'U') IS NULL
+BEGIN
+  CREATE TABLE dbo.job_application_references (
+    id BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+    job_application_id BIGINT NOT NULL,
+    reference_order INT NOT NULL,
+    reference_type NVARCHAR(50) NULL,
+    name NVARCHAR(200) NULL,
+    phone NVARCHAR(50) NULL,
+    email NVARCHAR(320) NULL,
+    created_at DATETIME2(0) NOT NULL CONSTRAINT DF_job_application_references_created_at DEFAULT (SYSUTCDATETIME()),
+    CONSTRAINT FK_job_application_references_job_application
+      FOREIGN KEY (job_application_id) REFERENCES dbo.job_applications(id) ON DELETE CASCADE
+  );
+END;
+GO
+
+IF NOT EXISTS (
+  SELECT 1 FROM sys.indexes
+  WHERE name = 'idx_job_application_references_app_id'
+    AND object_id = OBJECT_ID('dbo.job_application_references')
+)
+BEGIN
+  CREATE INDEX idx_job_application_references_app_id
+    ON dbo.job_application_references (job_application_id, reference_order);
+END;
+GO
+
 IF NOT EXISTS (
   SELECT 1
   FROM sys.check_constraints
