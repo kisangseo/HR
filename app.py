@@ -1664,12 +1664,7 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
     with get_sql_connection() as conn:
         cursor = conn.cursor()
         rows = cursor.execute(sql, params).fetchall()
-        queued_app_ids = enqueue_cognito_document_links_from_applicant_rows(cursor, rows)
-        if queued_app_ids:
-            conn.commit()
         uploaded_links_by_app = latest_uploaded_document_links_for_apps(cursor, [int(row[0]) for row in rows])
-    for queued_app_id in queued_app_ids:
-        kick_document_queue_processing(limit=25, app_id=queued_app_id)
 
     raw_output: list[dict[str, Any]] = []
     for row in rows:
@@ -1688,18 +1683,16 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
             other_clean.extend(split_positions_text(str(value)))
         other_clean = [value for value in other_clean if value and value.lower() != primary_clean.lower()]
         if _is_cognito_link(row[10]):
-            logging.warning(
-                "applicants_initial_link_still_cognito id=%s name=%s cognito_document_link=%s",
+            logging.debug(
+                "applicants_initial_link_still_cognito id=%s name=%s",
                 row[0],
                 row[2],
-                row[10],
             )
         if _is_cognito_link(row[13]):
-            logging.warning(
-                "applicants_resume_still_cognito id=%s name=%s resume_file_url=%s",
+            logging.debug(
+                "applicants_resume_still_cognito id=%s name=%s",
                 row[0],
                 row[2],
-                row[13],
             )
         uploaded_links = uploaded_links_by_app.get(int(row[0]), {})
 
