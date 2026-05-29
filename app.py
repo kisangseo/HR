@@ -1107,6 +1107,22 @@ APPLICATION_DOCUMENT_LINK_COLUMNS: dict[str, tuple[str, bool]] = {
 }
 
 
+APPLICANT_DOCUMENT_ROW_SPECS: tuple[tuple[str, int, bool], ...] = (
+    ("initial_application", 10, False),
+    ("background_check_form", 11, False),
+    ("background_check_document", 12, False),
+    ("resume", 13, False),
+    ("drivers_license", 14, True),
+    ("dd214", 15, True),
+    ("diploma", 16, True),
+    ("social_security_front", 17, True),
+    ("social_security_back", 18, True),
+    ("credit_report", 19, True),
+    ("birth_certificate", 20, True),
+    ("passport", 21, True),
+)
+
+
 def update_application_document_link(cursor, app_id: int, document_type: str, blob_url: str) -> bool:
     column_info = APPLICATION_DOCUMENT_LINK_COLUMNS.get(document_type)
     if not column_info or not blob_url:
@@ -1169,11 +1185,57 @@ def sync_uploaded_document_links(cursor, limit: int = 250) -> int:
     return updated
 
 
+def latest_uploaded_document_links_for_apps(cursor, app_ids: list[int]) -> dict[int, dict[str, str]]:
+    if not app_ids:
+        return {}
+    document_types = tuple(APPLICATION_DOCUMENT_LINK_COLUMNS)
+    app_placeholders = ", ".join("?" for _ in app_ids)
+    type_placeholders = ", ".join("?" for _ in document_types)
+    rows = cursor.execute(
+        f"""
+        SELECT job_application_id, document_type, azure_blob_url
+        FROM dbo.job_application_documents
+        WHERE status = 'uploaded'
+          AND azure_blob_url IS NOT NULL
+          AND job_application_id IN ({app_placeholders})
+          AND document_type IN ({type_placeholders})
+        ORDER BY id ASC
+        """,
+        (*app_ids, *document_types),
+    ).fetchall()
+    links_by_app: dict[int, dict[str, str]] = {}
+    for row in rows:
+        app_id = int(row[0])
+        document_type = str(row[1] or "")
+        blob_url = clean_text(row[2])
+        if blob_url:
+            links_by_app.setdefault(app_id, {})[document_type] = blob_url
+    return links_by_app
+
+
+def enqueue_cognito_document_links_from_applicant_rows(cursor, rows: list[Any]) -> set[int]:
+    queued_app_ids: set[int] = set()
+    for row in rows:
+        app_id = int(row[0])
+        for document_type, row_idx, _stores_json_array in APPLICANT_DOCUMENT_ROW_SPECS:
+            for url in extract_file_urls(row[row_idx]):
+                if not _is_cognito_link(url):
+                    continue
+                enqueue_document_record(cursor, app_id, document_type, url)
+                queued_app_ids.add(app_id)
+                logging.info(
+                    "queued_visible_cognito_document_link app_id=%s document_type=%s",
+                    app_id,
+                    document_type,
+                )
+    return queued_app_ids
+
+
 _DOCUMENT_QUEUE_KICK_LOCK = threading.Lock()
-_DOCUMENT_QUEUE_KICK_RUNNING = False
+_DOCUMENT_QUEUE_KICK_RUNNING: set[str] = set()
 
 
-def process_queued_document_batch(limit: int = 25) -> dict[str, int]:
+def process_queued_document_batch(limit: int = 25, app_id: int | None = None) -> dict[str, int]:
     processed = 0
     uploaded = 0
     failed = 0
@@ -1181,17 +1243,30 @@ def process_queued_document_batch(limit: int = 25) -> dict[str, int]:
     visible_links_updated = 0
     with get_sql_connection() as conn:
         cursor = conn.cursor()
-        rows = cursor.execute(
-            """
-            SELECT TOP (?) id, job_application_id, document_type, source_url
-            FROM dbo.job_application_documents
-            WHERE status IN ('queued', 'failed')
-              AND needs_manual = 0
-            ORDER BY id ASC
-            """,
-            (limit,),
-        ).fetchall()
-        for row in rows:
+        if app_id is not None:
+            rows = cursor.execute(
+                """
+                SELECT TOP (?) id, job_application_id, document_type, source_url
+                FROM dbo.job_application_documents
+                WHERE job_application_id = ?
+                  AND status IN ('queued', 'failed')
+                  AND needs_manual = 0
+                ORDER BY id DESC
+                """,
+                (limit, app_id),
+            ).fetchall()
+        else:
+            rows = cursor.execute(
+                """
+                SELECT TOP (?) id, job_application_id, document_type, source_url
+                FROM dbo.job_application_documents
+                WHERE status IN ('queued', 'failed')
+                  AND needs_manual = 0
+                ORDER BY id DESC
+                """,
+                (limit,),
+            ).fetchall()
+        for row in reversed(rows):
             processed += 1
             doc_id = int(row[0])
             app_id = int(row[1])
@@ -1228,6 +1303,7 @@ def process_queued_document_batch(limit: int = 25) -> dict[str, int]:
         visible_links_updated += sync_uploaded_document_links(cursor)
         conn.commit()
     return {
+        "job_application_id": app_id,
         "processed": processed,
         "uploaded": uploaded,
         "failed": failed,
@@ -1236,25 +1312,24 @@ def process_queued_document_batch(limit: int = 25) -> dict[str, int]:
     }
 
 
-def kick_document_queue_processing(limit: int = 25) -> bool:
-    global _DOCUMENT_QUEUE_KICK_RUNNING
+def kick_document_queue_processing(limit: int = 25, app_id: int | None = None) -> bool:
+    queue_key = str(app_id) if app_id is not None else "global"
     with _DOCUMENT_QUEUE_KICK_LOCK:
-        if _DOCUMENT_QUEUE_KICK_RUNNING:
+        if queue_key in _DOCUMENT_QUEUE_KICK_RUNNING:
             return False
-        _DOCUMENT_QUEUE_KICK_RUNNING = True
+        _DOCUMENT_QUEUE_KICK_RUNNING.add(queue_key)
 
     def worker() -> None:
-        global _DOCUMENT_QUEUE_KICK_RUNNING
         try:
-            result = process_queued_document_batch(limit=limit)
-            logging.info("document_queue_kick_completed result=%s", result)
+            result = process_queued_document_batch(limit=limit, app_id=app_id)
+            logging.info("document_queue_kick_completed app_id=%s result=%s", app_id, result)
         except Exception:
-            logging.exception("document_queue_kick_failed")
+            logging.exception("document_queue_kick_failed app_id=%s", app_id)
         finally:
             with _DOCUMENT_QUEUE_KICK_LOCK:
-                _DOCUMENT_QUEUE_KICK_RUNNING = False
+                _DOCUMENT_QUEUE_KICK_RUNNING.discard(queue_key)
 
-    threading.Thread(target=worker, name="document-queue-kick", daemon=True).start()
+    threading.Thread(target=worker, name=f"document-queue-kick-{queue_key}", daemon=True).start()
     return True
 
 
@@ -1498,8 +1573,6 @@ def build_document_links(cognito_pdf_url: Any, cognito_document_link: Any, backg
         if not text:
             return
         if not is_publishable_document_url(text):
-            log_key = "skipping_cognito_document_link" if _is_cognito_link(text) else "skipping_non_blob_document_link"
-            logging.warning("%s label=%s url=%s", log_key, label, text)
             return
         if any(item["url"] == text for item in links):
             return
@@ -1591,6 +1664,12 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
     with get_sql_connection() as conn:
         cursor = conn.cursor()
         rows = cursor.execute(sql, params).fetchall()
+        queued_app_ids = enqueue_cognito_document_links_from_applicant_rows(cursor, rows)
+        if queued_app_ids:
+            conn.commit()
+        uploaded_links_by_app = latest_uploaded_document_links_for_apps(cursor, [int(row[0]) for row in rows])
+    for queued_app_id in queued_app_ids:
+        kick_document_queue_processing(limit=25, app_id=queued_app_id)
 
     raw_output: list[dict[str, Any]] = []
     for row in rows:
@@ -1622,6 +1701,29 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
                 row[2],
                 row[13],
             )
+        uploaded_links = uploaded_links_by_app.get(int(row[0]), {})
+
+        def uploaded_or_existing(document_type: str, existing: Any, as_json_array: bool = False) -> Any:
+            uploaded_url = uploaded_links.get(document_type)
+            if uploaded_url:
+                return json.dumps([uploaded_url]) if as_json_array else uploaded_url
+            return existing
+
+        document_args = (
+            row[9],
+            uploaded_or_existing("initial_application", row[10]),
+            uploaded_or_existing("background_check_form", row[11]),
+            uploaded_or_existing("background_check_document", row[12]),
+            uploaded_or_existing("resume", row[13]),
+            uploaded_or_existing("drivers_license", row[14], True),
+            uploaded_or_existing("dd214", row[15], True),
+            uploaded_or_existing("diploma", row[16], True),
+            uploaded_or_existing("social_security_front", row[17], True),
+            uploaded_or_existing("social_security_back", row[18], True),
+            uploaded_or_existing("credit_report", row[19], True),
+            uploaded_or_existing("birth_certificate", row[20], True),
+            uploaded_or_existing("passport", row[21], True),
+        )
         raw_output.append(
             {
                 "id": row[0],
@@ -1635,7 +1737,7 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
                 "source": row[8],
                 "cognitoPdfUrl": row[9],
                 "cognitoDocumentLink": row[10],
-                "documents": build_document_links_safe(row[9], row[10], row[11], row[12], row[13], row[14], row[15], row[16], row[17], row[18], row[19], row[20], row[21]),
+                "documents": build_document_links_safe(*document_args),
                 "contacted": bool(row[22]) if row[22] is not None else False,
             }
         )
@@ -2234,7 +2336,7 @@ def app(environ, start_response):
                     cursor = conn.cursor()
                     app_id = upsert_background_record(cursor, mapped, payload)
                     conn.commit()
-                queue_worker_started = kick_document_queue_processing(limit=25)
+                queue_worker_started = kick_document_queue_processing(limit=25, app_id=app_id)
                 return _wsgi_json(start_response, {"inserted": 1, "source": "background_check", "job_application_id": app_id, "queue_worker_started": queue_worker_started})
             except Exception as exc:
                 logging.exception("/api/ingest-background-form failed")
@@ -2257,7 +2359,7 @@ def app(environ, start_response):
                     cursor = conn.cursor()
                     app_id = upsert_cognito_record(cursor, mapped, payload)
                     conn.commit()
-                queue_worker_started = kick_document_queue_processing(limit=25)
+                queue_worker_started = kick_document_queue_processing(limit=25, app_id=app_id)
                 return _wsgi_json(start_response, {"inserted": 1, "source": "cognito", "job_application_id": app_id, "queue_worker_started": queue_worker_started})
             except Exception as exc:
                 logging.exception("/api/ingest-cognito-form failed")
@@ -2302,7 +2404,8 @@ def app(environ, start_response):
             try:
                 payload = parse_json_body(body_text or "{}")
                 limit = int(payload.get("limit") or 50)
-                result = process_queued_document_batch(limit=limit)
+                requested_app_id = payload.get("job_application_id") or payload.get("app_id")
+                result = process_queued_document_batch(limit=limit, app_id=int(requested_app_id) if requested_app_id else None)
                 return _wsgi_json(start_response, {"source": "process-document-queue", **result})
             except Exception as exc:
                 logging.exception("/api/admin/process-document-queue failed")
@@ -2559,7 +2662,7 @@ class Handler(BaseHTTPRequestHandler):
                     cursor = conn.cursor()
                     app_id = upsert_background_record(cursor, mapped, payload)
                     conn.commit()
-                queue_worker_started = kick_document_queue_processing(limit=25)
+                queue_worker_started = kick_document_queue_processing(limit=25, app_id=app_id)
                 self._send_json({"inserted": 1, "source": "background_check", "job_application_id": app_id, "queue_worker_started": queue_worker_started})
             except Exception as exc:
                 logging.exception("/api/ingest-background-form failed")
@@ -2589,7 +2692,7 @@ class Handler(BaseHTTPRequestHandler):
                     cursor = conn.cursor()
                     app_id = upsert_cognito_record(cursor, mapped, payload)
                     conn.commit()
-                queue_worker_started = kick_document_queue_processing(limit=25)
+                queue_worker_started = kick_document_queue_processing(limit=25, app_id=app_id)
                 self._send_json({"inserted": 1, "source": "cognito", "job_application_id": app_id, "queue_worker_started": queue_worker_started})
             except Exception as exc:
                 logging.exception("/api/ingest-cognito-form failed")
@@ -2647,7 +2750,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 payload = parse_json_body(body or "{}")
                 limit = int(payload.get("limit") or 50)
-                result = process_queued_document_batch(limit=limit)
+                requested_app_id = payload.get("job_application_id") or payload.get("app_id")
+                result = process_queued_document_batch(limit=limit, app_id=int(requested_app_id) if requested_app_id else None)
                 self._send_json({"source": "process-document-queue", **result})
             except Exception as exc:
                 logging.exception("/api/admin/process-document-queue failed")
