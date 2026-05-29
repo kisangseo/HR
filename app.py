@@ -1107,6 +1107,22 @@ APPLICATION_DOCUMENT_LINK_COLUMNS: dict[str, tuple[str, bool]] = {
 }
 
 
+APPLICANT_DOCUMENT_ROW_SPECS: tuple[tuple[str, int, bool], ...] = (
+    ("initial_application", 10, False),
+    ("background_check_form", 11, False),
+    ("background_check_document", 12, False),
+    ("resume", 13, False),
+    ("drivers_license", 14, True),
+    ("dd214", 15, True),
+    ("diploma", 16, True),
+    ("social_security_front", 17, True),
+    ("social_security_back", 18, True),
+    ("credit_report", 19, True),
+    ("birth_certificate", 20, True),
+    ("passport", 21, True),
+)
+
+
 def update_application_document_link(cursor, app_id: int, document_type: str, blob_url: str) -> bool:
     column_info = APPLICATION_DOCUMENT_LINK_COLUMNS.get(document_type)
     if not column_info or not blob_url:
@@ -1197,8 +1213,26 @@ def latest_uploaded_document_links_for_apps(cursor, app_ids: list[int]) -> dict[
     return links_by_app
 
 
+def enqueue_cognito_document_links_from_applicant_rows(cursor, rows: list[Any]) -> set[int]:
+    queued_app_ids: set[int] = set()
+    for row in rows:
+        app_id = int(row[0])
+        for document_type, row_idx, _stores_json_array in APPLICANT_DOCUMENT_ROW_SPECS:
+            for url in extract_file_urls(row[row_idx]):
+                if not _is_cognito_link(url):
+                    continue
+                enqueue_document_record(cursor, app_id, document_type, url)
+                queued_app_ids.add(app_id)
+                logging.info(
+                    "queued_visible_cognito_document_link app_id=%s document_type=%s",
+                    app_id,
+                    document_type,
+                )
+    return queued_app_ids
+
+
 _DOCUMENT_QUEUE_KICK_LOCK = threading.Lock()
-_DOCUMENT_QUEUE_KICK_RUNNING = False
+_DOCUMENT_QUEUE_KICK_RUNNING: set[str] = set()
 
 
 def process_queued_document_batch(limit: int = 25, app_id: int | None = None) -> dict[str, int]:
@@ -1279,24 +1313,23 @@ def process_queued_document_batch(limit: int = 25, app_id: int | None = None) ->
 
 
 def kick_document_queue_processing(limit: int = 25, app_id: int | None = None) -> bool:
-    global _DOCUMENT_QUEUE_KICK_RUNNING
+    queue_key = str(app_id) if app_id is not None else "global"
     with _DOCUMENT_QUEUE_KICK_LOCK:
-        if _DOCUMENT_QUEUE_KICK_RUNNING:
+        if queue_key in _DOCUMENT_QUEUE_KICK_RUNNING:
             return False
-        _DOCUMENT_QUEUE_KICK_RUNNING = True
+        _DOCUMENT_QUEUE_KICK_RUNNING.add(queue_key)
 
     def worker() -> None:
-        global _DOCUMENT_QUEUE_KICK_RUNNING
         try:
             result = process_queued_document_batch(limit=limit, app_id=app_id)
             logging.info("document_queue_kick_completed app_id=%s result=%s", app_id, result)
         except Exception:
-            logging.exception("document_queue_kick_failed")
+            logging.exception("document_queue_kick_failed app_id=%s", app_id)
         finally:
             with _DOCUMENT_QUEUE_KICK_LOCK:
-                _DOCUMENT_QUEUE_KICK_RUNNING = False
+                _DOCUMENT_QUEUE_KICK_RUNNING.discard(queue_key)
 
-    threading.Thread(target=worker, name="document-queue-kick", daemon=True).start()
+    threading.Thread(target=worker, name=f"document-queue-kick-{queue_key}", daemon=True).start()
     return True
 
 
@@ -1540,8 +1573,6 @@ def build_document_links(cognito_pdf_url: Any, cognito_document_link: Any, backg
         if not text:
             return
         if not is_publishable_document_url(text):
-            log_key = "skipping_cognito_document_link" if _is_cognito_link(text) else "skipping_non_blob_document_link"
-            logging.warning("%s label=%s url=%s", log_key, label, text)
             return
         if any(item["url"] == text for item in links):
             return
@@ -1633,7 +1664,12 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
     with get_sql_connection() as conn:
         cursor = conn.cursor()
         rows = cursor.execute(sql, params).fetchall()
+        queued_app_ids = enqueue_cognito_document_links_from_applicant_rows(cursor, rows)
+        if queued_app_ids:
+            conn.commit()
         uploaded_links_by_app = latest_uploaded_document_links_for_apps(cursor, [int(row[0]) for row in rows])
+    for queued_app_id in queued_app_ids:
+        kick_document_queue_processing(limit=25, app_id=queued_app_id)
 
     raw_output: list[dict[str, Any]] = []
     for row in rows:
