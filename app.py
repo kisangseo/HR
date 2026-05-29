@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import csv
 import io
 import json
@@ -111,6 +112,22 @@ def is_publishable_document_url(url: Any) -> bool:
 def publishable_document_url(url: Any) -> str:
     text = clean_text(url)
     return text if is_publishable_document_url(text) else ""
+
+
+def display_document_url(url: Any, max_len: int = 120) -> str:
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    parsed = urlparse(text)
+    if parsed.scheme and parsed.netloc:
+        text = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+    if len(text) > max_len:
+        text = f"{text[:max_len - 3]}..."
+    return text
+
+
+def progress_print(message: str) -> None:
+    print(message, flush=True)
 
 
 def _parse_blob_url(blob_url: str) -> tuple[str, str] | None:
@@ -1235,7 +1252,7 @@ _DOCUMENT_QUEUE_KICK_LOCK = threading.Lock()
 _DOCUMENT_QUEUE_KICK_RUNNING: set[str] = set()
 
 
-def process_queued_document_batch(limit: int = 25, app_id: int | None = None) -> dict[str, int]:
+def process_queued_document_batch(limit: int = 25, app_id: int | None = None, verbose: bool = False) -> dict[str, int]:
     processed = 0
     uploaded = 0
     failed = 0
@@ -1266,6 +1283,9 @@ def process_queued_document_batch(limit: int = 25, app_id: int | None = None) ->
                 """,
                 (limit,),
             ).fetchall()
+        if verbose:
+            scope = f" for app_id={app_id}" if app_id is not None else ""
+            progress_print(f"Queue processor: found {len(rows)} queued/failed document(s){scope}.")
         for row in reversed(rows):
             processed += 1
             doc_id = int(row[0])
@@ -1274,8 +1294,16 @@ def process_queued_document_batch(limit: int = 25, app_id: int | None = None) ->
             source_url = str(row[3] or "")
             applicant_row = cursor.execute("SELECT TOP 1 full_name FROM dbo.job_applications WHERE id = ?", (app_id,)).fetchone()
             applicant_name = clean_text(applicant_row[0]) if applicant_row else None
+            if verbose:
+                progress_print(
+                    f"Queue doc_id={doc_id} app_id={app_id} name={applicant_name or '—'} "
+                    f"type={document_type} source={display_document_url(source_url)}"
+                )
             blob_name, blob_url, error = copy_url_to_azure_blob(app_id, document_type, source_url, applicant_name=applicant_name)
             status = "uploaded" if blob_url else ("manual_required" if error and "expired_or_denied" in error else "failed")
+            if verbose:
+                result = display_document_url(blob_url) if blob_url else (error or "no_blob_url")
+                progress_print(f"  -> {status}: {result}")
             needs_manual = 1 if status == "manual_required" else 0
             cursor.execute(
                 """
@@ -1785,7 +1813,7 @@ def query_applicants(filters: dict[str, str]) -> list[dict[str, Any]]:
     return output
 
 
-def run_blob_backfill(limit: int = 200) -> dict[str, int]:
+def run_blob_backfill(limit: int = 200, verbose: bool = False) -> dict[str, int]:
     with get_sql_connection() as conn:
         cursor = conn.cursor()
         rows = cursor.execute(
@@ -1799,18 +1827,28 @@ def run_blob_backfill(limit: int = 200) -> dict[str, int]:
             """,
             (limit,),
         ).fetchall()
+        if verbose:
+            progress_print(f"Blob backfill: scanning {len(rows)} application row(s).")
         migrated = 0
         for row in rows:
             app_id = int(row[0])
+            if verbose:
+                progress_print(f"Application app_id={app_id}")
             for doc_type, col_idx, col_name in [("initial_application", 2, "cognito_document_link"), ("background_check_form", 3, "background_pdf_url"), ("resume", 4, "resume_file_url")]:
                 original = clean_text(row[col_idx])
                 if not original:
                     continue
+                if verbose:
+                    progress_print(f"  Backfill {doc_type} from {display_document_url(original)}")
                 try:
                     updated = persist_document_record(cursor, app_id, doc_type, original)
                 except Exception:
                     logging.exception("backfill persist failed app_id=%s doc_type=%s", app_id, doc_type)
+                    if verbose:
+                        progress_print(f"    -> error; see log for traceback")
                     continue
+                if verbose:
+                    progress_print(f"    -> {'updated ' + display_document_url(updated) if updated else 'no blob created'}")
                 if doc_type == "initial_application":
                     logging.info(
                         "backfill_initial_application_result app_id=%s source=%s updated=%s changed=%s",
@@ -1826,11 +1864,17 @@ def run_blob_backfill(limit: int = 200) -> dict[str, int]:
                 current = parse_json_array_text(row[idx])
                 replaced: list[str] = []
                 for url in current:
+                    if verbose:
+                        progress_print(f"  Backfill {doc_type} from {display_document_url(url)}")
                     try:
                         updated_url = persist_document_record(cursor, app_id, doc_type, url)
                         replaced.append(updated_url or url)
+                        if verbose:
+                            progress_print(f"    -> {'updated ' + display_document_url(updated_url) if updated_url else 'no blob created'}")
                     except Exception:
                         logging.exception("backfill persist failed app_id=%s doc_type=%s", app_id, doc_type)
+                        if verbose:
+                            progress_print(f"    -> error; see log for traceback")
                         replaced.append(url)
                 if replaced != current:
                     cursor.execute(f"UPDATE dbo.job_applications SET {col_name} = ? WHERE id = ?", (json.dumps(replaced), app_id))
@@ -2772,6 +2816,32 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json({"error": "CSV ingest is disabled."}, 410)
 
 
+def run_backfill_cli(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="HR app maintenance commands")
+    subparsers = parser.add_subparsers(dest="command")
+
+    backfill_parser = subparsers.add_parser("backfill-blobs", help="Convert existing document URLs to Azure Blob URLs")
+    backfill_parser.add_argument("--limit", type=int, default=500, help="Number of job_application rows to scan")
+    backfill_parser.add_argument("--queue-limit", type=int, default=500, help="Number of queued document rows to process after backfill")
+    backfill_parser.add_argument("--app-id", type=int, default=None, help="Only process queued documents for one application id")
+    backfill_parser.add_argument("--skip-queue", action="store_true", help="Only run run_blob_backfill; do not process the queue")
+    backfill_parser.add_argument("--quiet", action="store_true", help="Only print final JSON summaries")
+
+    args = parser.parse_args(argv)
+    if args.command == "backfill-blobs":
+        verbose = not args.quiet
+        progress_print("Running blob backfill...")
+        backfill = run_blob_backfill(limit=args.limit, verbose=verbose)
+        progress_print(json.dumps(backfill, indent=2))
+        if not args.skip_queue:
+            progress_print("Processing queued document uploads...")
+            queue = process_queued_document_batch(limit=args.queue_limit, app_id=args.app_id, verbose=verbose)
+            progress_print(json.dumps(queue, indent=2))
+        return
+
+    run()
+
+
 def run() -> None:
     server = ThreadingHTTPServer((SERVER_HOST, SERVER_PORT), Handler)
     print(f"HR app running at http://{SERVER_HOST}:{SERVER_PORT}")
@@ -2779,4 +2849,4 @@ def run() -> None:
 
 
 if __name__ == "__main__":
-    run()
+    run_backfill_cli()
