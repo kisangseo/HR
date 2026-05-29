@@ -18,7 +18,7 @@ from datetime import datetime, timezone, timedelta
 from io import BytesIO
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 try:
     import pyodbc
@@ -143,18 +143,72 @@ def _sanitize_filename_part(value: str) -> str:
     return text[:80] if text else "unknown-applicant"
 
 
-def _build_blob_name(app_id: int, document_type: str, original_url: str, applicant_name: str | None = None, content_type: str | None = None) -> str:
+def _safe_extension_from_filename(filename: str | None) -> str:
+    tail = (Path(unquote(filename or "")).name or "").strip()
+    if "." not in tail:
+        return ""
+    ext = "." + tail.rsplit(".", 1)[-1].lower()
+    return ext if re.fullmatch(r"\.[a-z0-9]{1,10}", ext) else ""
+
+
+def _content_disposition_filename(value: str | None) -> str:
+    header = value or ""
+    match = re.search(r"filename\*=([^;]+)", header, flags=re.IGNORECASE)
+    if match:
+        raw = match.group(1).strip().strip('"')
+        if "''" in raw:
+            raw = raw.split("''", 1)[1]
+        return unquote(raw)
+    match = re.search(r'filename="([^"]+)"', header, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    match = re.search(r"filename=([^;]+)", header, flags=re.IGNORECASE)
+    return match.group(1).strip().strip('"') if match else ""
+
+
+def _sniff_content_type(content: bytes | None) -> str:
+    data = content or b""
+    if data.startswith(b"%PDF-"):
+        return "application/pdf"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if data.startswith((b"II*\x00", b"MM\x00*")):
+        return "image/tiff"
+    if data.startswith(b"BM"):
+        return "image/bmp"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if len(data) >= 12 and data[4:8] == b"ftyp" and data[8:12] in {b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1"}:
+        return "image/heic"
+    return ""
+
+
+def _best_content_type(header_content_type: str | None, content: bytes | None) -> str:
+    sniffed = _sniff_content_type(content)
+    header = (header_content_type or "").split(";", 1)[0].strip().lower()
+    if sniffed and (not header or header in {"application/octet-stream", "binary/octet-stream", "text/plain", "text/html"}):
+        return sniffed
+    return header or sniffed or "application/octet-stream"
+
+
+def _build_blob_name(app_id: int, document_type: str, original_url: str, applicant_name: str | None = None, content_type: str | None = None, original_filename: str | None = None) -> str:
     ext = ""
     parsed = urlparse(original_url or "")
-    tail = (Path(parsed.path).name or "").strip()
-    if "." in tail:
-        ext = "." + tail.rsplit(".", 1)[-1].lower()
+    ext = _safe_extension_from_filename(Path(parsed.path).name)
+    if not ext:
+        ext = _safe_extension_from_filename(original_filename)
     if not ext and content_type:
         guessed = mimetypes.guess_extension((content_type or "").split(";")[0].strip().lower())
         if guessed:
             ext = guessed
     if not ext:
         ext = ".bin"
+    if ext in {".jpe", ".jpeg"}:
+        ext = ".jpg"
     safe_doc = re.sub(r"[^a-z0-9_-]+", "-", document_type.lower()).strip("-") or "document"
     safe_name = _sanitize_filename_part(applicant_name or "")
     return f"{AZURE_STORAGE_BLOB_PREFIX}/{app_id}/{safe_name}_{safe_doc}_{int(datetime.now(timezone.utc).timestamp())}{ext}"
@@ -185,7 +239,7 @@ def copy_url_to_azure_blob(app_id: int, document_type: str, source_url: str, app
         props = source_blob_client.get_blob_properties()
         content_type = (props.content_settings.content_type if props and props.content_settings else None) or "application/octet-stream"
         content_bytes = source_blob_client.download_blob().readall()
-        new_blob_name = _build_blob_name(app_id, document_type, source, applicant_name=applicant_name, content_type=content_type)
+        new_blob_name = _build_blob_name(app_id, document_type, source, applicant_name=applicant_name, content_type=content_type, original_filename=os.path.basename(existing_blob_name))
         target_blob_client = client.get_blob_client(container=AZURE_STORAGE_CONTAINER_NAME, blob=new_blob_name)
         upload_kwargs: dict[str, Any] = {"overwrite": True}
         if ContentSettings is not None:
@@ -194,16 +248,20 @@ def copy_url_to_azure_blob(app_id: int, document_type: str, source_url: str, app
         return new_blob_name, target_blob_client.url, None
     resp = requests.get(source, timeout=45)
     if resp.status_code >= 400:
-        if resp.status_code in {401, 403, 404}:
+        if resp.status_code in {401, 403, 404, 410}:
             return None, None, f"source_expired_or_denied_{resp.status_code}"
         return None, None, f"source_download_failed_{resp.status_code}"
-    ctype = (resp.headers.get("Content-Type") or "application/octet-stream").split(";")[0].strip()
-    blob_name = _build_blob_name(app_id, document_type, source, applicant_name=applicant_name, content_type=ctype)
+    content_bytes = resp.content
+    ctype = _best_content_type(resp.headers.get("Content-Type"), content_bytes)
+    if ctype == "text/html" and not _sniff_content_type(content_bytes):
+        return None, None, "source_download_returned_html"
+    original_filename = _content_disposition_filename(resp.headers.get("Content-Disposition"))
+    blob_name = _build_blob_name(app_id, document_type, source, applicant_name=applicant_name, content_type=ctype, original_filename=original_filename)
     blob_client = client.get_blob_client(container=AZURE_STORAGE_CONTAINER_NAME, blob=blob_name)
     upload_kwargs: dict[str, Any] = {"overwrite": True}
     if ContentSettings is not None:
         upload_kwargs["content_settings"] = ContentSettings(content_type=ctype)
-    blob_client.upload_blob(resp.content, **upload_kwargs)
+    blob_client.upload_blob(content_bytes, **upload_kwargs)
     return blob_name, blob_client.url, None
 
 
