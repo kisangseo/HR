@@ -1252,7 +1252,9 @@ _DOCUMENT_QUEUE_KICK_LOCK = threading.Lock()
 _DOCUMENT_QUEUE_KICK_RUNNING: set[str] = set()
 
 
-def process_queued_document_batch(limit: int = 25, app_id: int | None = None, verbose: bool = False) -> dict[str, int]:
+def process_queued_document_batch(limit: int = 25, app_id: int | None = None, verbose: bool = False, include_failed: bool = False) -> dict[str, int]:
+    requested_app_id = app_id
+    status_filter = ("queued", "failed") if include_failed else ("queued",)
     processed = 0
     uploaded = 0
     failed = 0
@@ -1266,26 +1268,27 @@ def process_queued_document_batch(limit: int = 25, app_id: int | None = None, ve
                 SELECT TOP (?) id, job_application_id, document_type, source_url
                 FROM dbo.job_application_documents
                 WHERE job_application_id = ?
-                  AND status IN ('queued', 'failed')
+                  AND status IN (?, ?)
                   AND needs_manual = 0
                 ORDER BY id DESC
                 """,
-                (limit, app_id),
+                (limit, app_id, status_filter[0], status_filter[-1]),
             ).fetchall()
         else:
             rows = cursor.execute(
                 """
                 SELECT TOP (?) id, job_application_id, document_type, source_url
                 FROM dbo.job_application_documents
-                WHERE status IN ('queued', 'failed')
+                WHERE status IN (?, ?)
                   AND needs_manual = 0
                 ORDER BY id DESC
                 """,
-                (limit,),
+                (limit, status_filter[0], status_filter[-1]),
             ).fetchall()
         if verbose:
-            scope = f" for app_id={app_id}" if app_id is not None else ""
-            progress_print(f"Queue processor: found {len(rows)} queued/failed document(s){scope}.")
+            scope = f" for app_id={requested_app_id}" if requested_app_id is not None else ""
+            statuses = "queued + failed" if include_failed else "queued"
+            progress_print(f"Queue processor: found {len(rows)} {statuses} document(s){scope}.")
         for row in reversed(rows):
             processed += 1
             doc_id = int(row[0])
@@ -2442,7 +2445,8 @@ def app(environ, start_response):
                 payload = parse_json_body(body_text or "{}")
                 limit = int(payload.get("limit") or 50)
                 requested_app_id = payload.get("job_application_id") or payload.get("app_id")
-                result = process_queued_document_batch(limit=limit, app_id=int(requested_app_id) if requested_app_id else None)
+                include_failed = bool(payload.get("include_failed") or payload.get("retry_failed"))
+                result = process_queued_document_batch(limit=limit, app_id=int(requested_app_id) if requested_app_id else None, include_failed=include_failed)
                 return _wsgi_json(start_response, {"source": "process-document-queue", **result})
             except Exception as exc:
                 logging.exception("/api/admin/process-document-queue failed")
@@ -2788,7 +2792,8 @@ class Handler(BaseHTTPRequestHandler):
                 payload = parse_json_body(body or "{}")
                 limit = int(payload.get("limit") or 50)
                 requested_app_id = payload.get("job_application_id") or payload.get("app_id")
-                result = process_queued_document_batch(limit=limit, app_id=int(requested_app_id) if requested_app_id else None)
+                include_failed = bool(payload.get("include_failed") or payload.get("retry_failed"))
+                result = process_queued_document_batch(limit=limit, app_id=int(requested_app_id) if requested_app_id else None, include_failed=include_failed)
                 self._send_json({"source": "process-document-queue", **result})
             except Exception as exc:
                 logging.exception("/api/admin/process-document-queue failed")
@@ -2825,6 +2830,7 @@ def run_backfill_cli(argv: list[str] | None = None) -> None:
     backfill_parser.add_argument("--queue-limit", type=int, default=500, help="Number of queued document rows to process after backfill")
     backfill_parser.add_argument("--app-id", type=int, default=None, help="Only process queued documents for one application id")
     backfill_parser.add_argument("--skip-queue", action="store_true", help="Only run run_blob_backfill; do not process the queue")
+    backfill_parser.add_argument("--retry-failed", action="store_true", help="Also retry rows already marked failed; default only processes fresh queued rows")
     backfill_parser.add_argument("--quiet", action="store_true", help="Only print final JSON summaries")
 
     args = parser.parse_args(argv)
@@ -2835,7 +2841,7 @@ def run_backfill_cli(argv: list[str] | None = None) -> None:
         progress_print(json.dumps(backfill, indent=2))
         if not args.skip_queue:
             progress_print("Processing queued document uploads...")
-            queue = process_queued_document_batch(limit=args.queue_limit, app_id=args.app_id, verbose=verbose)
+            queue = process_queued_document_batch(limit=args.queue_limit, app_id=args.app_id, verbose=verbose, include_failed=args.retry_failed)
             progress_print(json.dumps(queue, indent=2))
         return
 
