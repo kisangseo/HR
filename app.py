@@ -36,6 +36,7 @@ ROOT = Path(__file__).resolve().parent
 APP_VERSION = "2026-04-29.cognito-upsert-v1"
 SQL_CONNECTION_STRING = os.getenv("HR_SQL_CONNECTION_STRING", "").strip()
 MAKE_WEBHOOK_TOKEN = os.getenv("HR_MAKE_WEBHOOK_TOKEN", "").strip()
+AUTO_PROCESS_DOCUMENT_QUEUE = os.getenv("HR_AUTO_PROCESS_DOCUMENT_QUEUE", "").strip().lower() in {"1", "true", "yes", "on"}
 RUN_INGEST_TOKEN = os.getenv("HR_RUN_INGEST_TOKEN", "").strip()
 SERVER_HOST = os.getenv("HR_HOST", "127.0.0.1").strip() or "127.0.0.1"
 SERVER_PORT = int(os.getenv("PORT") or os.getenv("HR_PORT") or "8000")
@@ -1402,6 +1403,9 @@ def process_queued_document_batch(limit: int = 25, app_id: int | None = None, ve
 
 
 def kick_document_queue_processing(limit: int = 25, app_id: int | None = None) -> bool:
+    if not AUTO_PROCESS_DOCUMENT_QUEUE:
+        logging.info("document_queue_kick_skipped app_id=%s reason=auto_processing_disabled", app_id)
+        return False
     queue_key = str(app_id) if app_id is not None else "global"
     with _DOCUMENT_QUEUE_KICK_LOCK:
         if queue_key in _DOCUMENT_QUEUE_KICK_RUNNING:

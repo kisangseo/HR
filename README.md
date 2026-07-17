@@ -129,6 +129,20 @@ This repo now exposes a WSGI callable named `app` in `app.py`, so Oryx/Gunicorn 
    - `other_positions` (array or comma-separated string)
    - `submission_date` (optional; fallback is current UTC date)
 
+
+### Document queue processing
+
+Cognito/background webhooks enqueue application PDFs and resumes for Azure Blob copying, but they do **not** process that queue during the webhook request by default. This keeps MAKE from waiting on large PDF uploads and hitting its 40-second queue timeout.
+
+To process queued documents, call the admin endpoint out-of-band:
+
+```bash
+curl -X POST "http://YOUR_HOST:8000/api/admin/process-document-queue?limit=25" \
+  -H "X-Webhook-Token: <HR_MAKE_WEBHOOK_TOKEN>"
+```
+
+If you intentionally want the app to start a background queue worker after each webhook response, set `HR_AUTO_PROCESS_DOCUMENT_QUEUE=true`. Leave it unset for MAKE scenarios that must return immediately.
+
 ### Additional documents webhook (`/api/job-app-docs`)
 
 Use this endpoint for the Cognito "Applicant Document Submission" form to attach new document URLs to an existing applicant.
